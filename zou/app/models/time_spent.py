@@ -19,9 +19,16 @@ class TimeSpent(db.Model, BaseMixin, SerializerMixin):
         UUIDType(binary=False), db.ForeignKey("person.id"), index=True
     )
 
+    timer_id = db.Column(
+        UUIDType(binary=False),
+        db.ForeignKey("timer.id"),
+        nullable=True,
+        index=True,
+    )
+
     __table_args__ = (
         db.UniqueConstraint(
-            "person_id", "task_id", "date", name="time_spent_uc"
+            "person_id", "task_id", "date", "timer_id", name="time_spent_uc"
         ),
         db.CheckConstraint("duration > 0", name="check_duration_positive"),
     )

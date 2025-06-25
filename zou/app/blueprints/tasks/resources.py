@@ -25,6 +25,7 @@ from zou.app.services import (
     projects_service,
     shots_service,
     tasks_service,
+    timers_service,
     user_service,
     concepts_service,
 )
@@ -1308,6 +1309,29 @@ class GetTimeSpentDateResource(Resource):
             return tasks_service.get_time_spents(task_id, date)
         except WrongDateFormatException:
             abort(404)
+
+
+class StartTimerResource(Resource):
+    @jwt_required()
+    def post(self, task_id):
+        current_user = persons_service.get_current_user()
+        user_service.check_time_spent_access(task_id, current_user["id"])
+        timer = timers_service.start_timer(task_id, current_user["id"])
+        return timer, 201
+
+
+class EndTimerResource(Resource):
+    @jwt_required()
+    def post(self):
+        time_spent = timers_service.end_timer()
+        return time_spent, 201
+
+
+class DiscardTimerResource(Resource):
+    @jwt_required()
+    def delete(self):
+        timers_service.discard_timer()
+        return "", 204
 
 
 class DeleteAllTasksForTaskTypeResource(Resource):
