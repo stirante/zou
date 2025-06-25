@@ -73,6 +73,10 @@ class TimeSpentNotFoundException(NotFound):
     pass
 
 
+class TimerNotFoundException(NotFound):
+    pass
+
+
 class ProjectNotFoundException(NotFound):
     pass
 
