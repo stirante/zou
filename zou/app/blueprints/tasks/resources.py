@@ -1334,6 +1334,24 @@ class DiscardTimerResource(Resource):
         return "", 204
 
 
+class EditTimerResource(Resource, ArgsMixin):
+    @jwt_required()
+    def put(self, timer_id):
+        args = self.get_args([("start_time", None, True, str)])
+        start_time = date_helpers.get_datetime_from_string(args["start_time"])
+        timer = timers_service.update_start_time(timer_id, start_time)
+        return timer, 200
+
+
+class TaskTimersResource(Resource, ArgsMixin):
+    @jwt_required()
+    def get(self, task_id):
+        user_service.check_task_access(task_id)
+        page = self.get_page()
+        limit = self.get_limit()
+        return timers_service.get_timers_for_task(task_id, page, limit)
+
+
 class DeleteAllTasksForTaskTypeResource(Resource):
     """
     Delete all tasks for a given task type and project. It's mainly used

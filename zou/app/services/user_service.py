@@ -14,6 +14,7 @@ from zou.app.models.search_filter import SearchFilter
 from zou.app.models.search_filter_group import SearchFilterGroup
 from zou.app.models.task import Task
 from zou.app.models.task_type import TaskType
+from zou.app.models.timer import Timer
 
 from zou.app.services import (
     assets_service,
@@ -34,6 +35,7 @@ from zou.app.services.exception import (
     SearchFilterGroupNotFoundException,
     NotificationNotFoundException,
     WrongParameterException,
+    TimerNotFoundException,
 )
 from zou.app.utils import cache, fields, permissions
 
@@ -607,6 +609,18 @@ def check_time_spent_access(task_id, person_id):
     if not is_allowed:
         raise permissions.PermissionDenied
     return is_allowed
+
+
+def check_timer_access(timer_id):
+    """Return True if current user started the timer."""
+
+    timer = Timer.get(timer_id)
+    if timer is None:
+        raise TimerNotFoundException()
+    current_user_id = persons_service.get_current_user()["id"]
+    if str(timer.person_id) != current_user_id:
+        raise permissions.PermissionDenied
+    return True
 
 
 def check_supervisor_project_access(project_id):
