@@ -1334,13 +1334,36 @@ class DiscardTimerResource(Resource):
         return "", 204
 
 
-class EditTimerResource(Resource, ArgsMixin):
+class TimerResource(Resource, ArgsMixin):
     @jwt_required()
-    def put(self, timer_id):
-        args = self.get_args([("start_time", None, True, str)])
-        start_time = date_helpers.get_datetime_from_string(args["start_time"])
-        timer = timers_service.update_start_time(timer_id, start_time)
+    def patch(self, timer_id):
+        args = self.get_args(
+            [
+                ("start_time", None, False, str),
+                ("end_time", None, False, str),
+            ]
+        )
+
+        start_time = (
+            date_helpers.get_datetime_from_string(args["start_time"])
+            if args.get("start_time")
+            else None
+        )
+        end_time = (
+            date_helpers.get_datetime_from_string(args["end_time"])
+            if args.get("end_time")
+            else None
+        )
+
+        timer = timers_service.update_timer(
+            timer_id, start_time=start_time, end_time=end_time
+        )
         return timer, 200
+
+    @jwt_required()
+    def delete(self, timer_id):
+        timers_service.delete_timer(timer_id)
+        return "", 204
 
 
 class TaskTimersResource(Resource, ArgsMixin):
@@ -1350,6 +1373,20 @@ class TaskTimersResource(Resource, ArgsMixin):
         page = self.get_page()
         limit = self.get_limit()
         return timers_service.get_timers_for_task(task_id, page, limit)
+
+
+class UserTimersResource(Resource, ArgsMixin):
+    @jwt_required()
+    def get(self):
+        """Return timers for the current user."""
+
+        current_user = persons_service.get_current_user()
+        page = self.get_page()
+        limit = self.get_limit()
+        embed_task = self.get_bool_parameter("embed_task", "false")
+        return timers_service.get_timers_for_user(
+            current_user["id"], page, limit, embed_task
+        )
 
 
 class DeleteAllTasksForTaskTypeResource(Resource):

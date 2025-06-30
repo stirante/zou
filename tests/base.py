@@ -195,6 +195,14 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def patch(self, path, data, code=200):
+        """Run a patch request at given path sending JSON data."""
+        response = self.app.patch(
+            path, data=json.dumps(data), headers=self.post_headers
+        )
+        self.assertEqual(response.status_code, code)
+        return json.loads(response.data.decode("utf-8"))
+
     def delete(self, path, code=204):
         """
         Run a delete request at given path.
