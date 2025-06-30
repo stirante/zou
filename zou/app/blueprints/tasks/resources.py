@@ -1366,15 +1366,6 @@ class TimerResource(Resource, ArgsMixin):
         return "", 204
 
 
-class TaskTimersResource(Resource, ArgsMixin):
-    @jwt_required()
-    def get(self, task_id):
-        user_service.check_task_access(task_id)
-        page = self.get_page()
-        limit = self.get_limit()
-        return timers_service.get_timers_for_task(task_id, page, limit)
-
-
 class UserTimersResource(Resource, ArgsMixin):
     @jwt_required()
     def get(self):

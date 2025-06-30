@@ -200,7 +200,7 @@ class ApiTestCase(unittest.TestCase):
         response = self.app.patch(
             path, data=json.dumps(data), headers=self.post_headers
         )
-        self.assertEqual(response.status_code, code)
+        self.assertEqual(response.status_code, code, response.data.decode("utf-8"))
         return json.loads(response.data.decode("utf-8"))
 
     def delete(self, path, code=204):

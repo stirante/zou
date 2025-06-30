@@ -5,10 +5,12 @@ from zou.app.utils import (
     events,
     date_helpers,
     query as query_utils,
-    permissions,
 )
 from zou.app.services import persons_service, user_service, tasks_service
-from zou.app.services.exception import TimerNotFoundException
+from zou.app.services.exception import (
+    TimerNotFoundException,
+    WrongParameterException,
+)
 
 
 class TimerAlreadyStopped(Exception):
@@ -123,112 +125,6 @@ def delete_timer(timer_id):
     )
 
 
-def update_start_time(timer_id, start_time):
-    """Update the start time of a timer."""
-
-    timer = Timer.get(timer_id)
-    if timer is None:
-        raise TimerNotFoundException()
-    user_service.check_timer_access(timer_id)
-
-    timer.start_time = start_time
-    timer.date = start_time.date()
-    timer.save()
-
-    project_id = str(Task.get(timer.task_id).project_id)
-
-    if timer.end_time is not None:
-        duration = (timer.end_time - timer.start_time).total_seconds()
-        time_spent = TimeSpent.get_by(timer_id=timer.id)
-        if time_spent is None:
-            time_spent = TimeSpent.create(
-                task_id=timer.task_id,
-                person_id=timer.person_id,
-                date=timer.date,
-                duration=duration,
-                timer_id=timer.id,
-            )
-            events.emit(
-                "time-spent:new",
-                {"time_spent_id": str(time_spent.id)},
-                project_id=project_id,
-            )
-        else:
-            time_spent.duration = duration
-            time_spent.save()
-            events.emit(
-                "time-spent:update",
-                {"time_spent_id": str(time_spent.id)},
-                project_id=project_id,
-            )
-
-        task = Task.get(timer.task_id)
-        task.duration = sum(
-            ts.duration for ts in TimeSpent.get_all_by(task_id=timer.task_id)
-        )
-        task.save()
-        events.emit(
-            "task:update", {"task_id": str(task.id)}, project_id=project_id
-        )
-    events.emit(
-        "timer:update",
-        {"timer_id": str(timer.id)},
-        project_id=project_id,
-    )
-    return timer.serialize()
-
-
-def update_end_time(timer_id, end_time):
-    """Update the end time of a timer and its related time spent."""
-
-    timer = Timer.get(timer_id)
-    if timer is None:
-        raise TimerNotFoundException()
-    user_service.check_timer_access(timer_id)
-
-    timer.end_time = end_time
-    timer.save()
-
-    duration = (timer.end_time - timer.start_time).total_seconds()
-    project_id = str(Task.get(timer.task_id).project_id)
-
-    time_spent = TimeSpent.get_by(timer_id=timer.id)
-    if time_spent is None:
-        time_spent = TimeSpent.create(
-            task_id=timer.task_id,
-            person_id=timer.person_id,
-            date=timer.date,
-            duration=duration,
-            timer_id=timer.id,
-        )
-        events.emit(
-            "time-spent:new",
-            {"time_spent_id": str(time_spent.id)},
-            project_id=project_id,
-        )
-    else:
-        time_spent.duration = duration
-        time_spent.save()
-        events.emit(
-            "time-spent:update",
-            {"time_spent_id": str(time_spent.id)},
-            project_id=project_id,
-        )
-
-    task = Task.get(timer.task_id)
-    task.duration = sum(
-        ts.duration for ts in TimeSpent.get_all_by(task_id=timer.task_id)
-    )
-    task.save()
-    events.emit(
-        "task:update", {"task_id": str(task.id)}, project_id=project_id
-    )
-    events.emit(
-        "timer:update", {"timer_id": str(timer.id)}, project_id=project_id
-    )
-    return timer.serialize()
-
-
 def update_timer(timer_id, start_time=None, end_time=None):
     """Update start and/or end time of a timer."""
 
@@ -236,6 +132,64 @@ def update_timer(timer_id, start_time=None, end_time=None):
     if timer is None:
         raise TimerNotFoundException()
     user_service.check_timer_access(timer_id)
+
+    new_start = start_time if start_time is not None else timer.start_time
+    new_end = end_time if end_time is not None else timer.end_time
+
+    #  is the NEW interval entirely inside an existing timer? 
+    container_q = (
+        Timer.query
+        .filter(Timer.person_id == timer.person_id, Timer.id != timer.id)
+        .filter(Timer.start_time <= new_start)
+    )
+    if new_end is None:
+        # this timer is still open -> any other still-open timer that started earlier encloses it
+        container_q = container_q.filter(Timer.end_time.is_(None))
+    else:
+        # other timer must end at/after the new end
+        container_q = container_q.filter(
+            (Timer.end_time.is_(None)) | (Timer.end_time >= new_end)
+        )
+
+    if container_q.first() is not None:
+        raise WrongParameterException("Timer cannot be inside another timer")
+
+    now = date_helpers.get_utc_now_datetime()
+    if new_start > now or (new_end is not None and new_end > now):
+        raise WrongParameterException("Timer cannot be set in the future")
+
+    if new_end is not None and new_end <= new_start:
+        raise WrongParameterException("End time must be after start time")
+
+    # Check if other timers are inside the new start and end times
+    contained = _find_timers_inside(timer.person_id, new_start, new_end, timer.id)
+    if contained:
+        raise WrongParameterException(
+            "Timer cannot be inside another timer"
+        )
+
+    # Adjust other timers if the new start or end time overlaps with them
+    if start_time is not None:
+        overlapping = (
+            Timer.query.filter(Timer.person_id == timer.person_id)
+            .filter(Timer.id != timer.id)
+            .filter(Timer.start_time < start_time)
+            .filter((Timer.end_time == None) | (Timer.end_time > start_time))
+            .all()
+        )
+        for other in overlapping:
+            update_timer(other.id, end_time=start_time)
+
+    if end_time is not None:
+        overlapping = (
+            Timer.query.filter(Timer.person_id == timer.person_id)
+            .filter(Timer.id != timer.id)
+            .filter(Timer.start_time < end_time)
+            .filter((Timer.end_time == None) | (Timer.end_time > end_time))
+            .all()
+        )
+        for other in overlapping:
+            update_timer(other.id, start_time=end_time)
 
     if start_time is not None:
         timer.start_time = start_time
@@ -328,3 +282,35 @@ def get_timers_for_user(person_id, page=0, limit=None, embed_task=False):
             timer["task"] = cache[task_id]
 
     return results
+
+
+def _find_timers_inside(person_id, outer_start, outer_end, exclude_id):
+    """
+    Return any timers (except *exclude_id*) that are fully contained
+    inside the interval [outer_start, outer_end].
+
+    If *outer_end* is None the interval is considered still running,
+    so we must look for:
+      * other running timers   (end_time is NULL)   OR
+      * past timers that have already finished      (end_time <= now)
+    """
+
+    q = Timer.query.filter(
+        Timer.person_id == person_id,
+        Timer.id != exclude_id,
+        Timer.start_time >= outer_start,   # starts after / at outer_start
+    )
+
+    if outer_end is None:                 # edited timer is still running
+        now = date_helpers.get_utc_now_datetime()
+        q = q.filter(
+            (Timer.end_time.is_(None))    # running
+            | (Timer.end_time <= now)     # closed before "now"
+        )
+    else:
+        q = q.filter(
+            Timer.end_time.isnot(None),
+            Timer.end_time <= outer_end   # finishes before / at outer_end
+        )
+
+    return q.all()
