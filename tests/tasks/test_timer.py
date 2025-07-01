@@ -1,10 +1,14 @@
-from tests.base import ApiDBTestCase
-from zou.app.models.timer import Timer
-from zou.app.models.time_spent import TimeSpent
-from zou.app.models.task import Task
-from zou.app.utils import date_helpers
 import datetime
 import time
+
+from pytz import timezone
+
+from tests.base import ApiDBTestCase
+from zou.app import config
+from zou.app.models.task import Task
+from zou.app.models.time_spent import TimeSpent
+from zou.app.models.timer import Timer
+from zou.app.utils import date_helpers
 
 
 class TimerTestCase(ApiDBTestCase):
@@ -78,14 +82,32 @@ class TimerTestCase(ApiDBTestCase):
             self.post(f"/actions/tasks/{task.id}/timer/start", {})
             self.post("/actions/tasks/timer/end", {})
 
-        result = self.get("/data/timers?page=1&limit=1&embed_task=true")
-        self.assertEqual(result["total"], 2)
-        self.assertEqual(result["nb_pages"], 2)
-        self.assertEqual(len(result["data"]), 1)
-        self.assertIn("task", result["data"][0])
+        first_timer = Timer.query.order_by(Timer.start_time).first()
+        prev_day = (
+            date_helpers.get_utc_now_datetime() - datetime.timedelta(days=1)
+        ).replace(hour=23, minute=0, second=0, microsecond=0)
+        self.patch(
+            f"/actions/tasks/timer/{first_timer.id}",
+            {
+                "start_time": date_helpers.get_date_string(prev_day),
+                "end_time": date_helpers.get_date_string(
+                    prev_day + datetime.timedelta(minutes=1)
+                ),
+            },
+        )
 
-        result_page2 = self.get("/data/timers?page=2&limit=1")
-        self.assertEqual(len(result_page2["data"]), 1)
+        tz = timezone(config.DEFAULT_TIMEZONE)
+        query_date = (
+            timezone("UTC")
+            .localize(prev_day)
+            .astimezone(tz)
+            .date()
+            .strftime("%Y-%m-%d")
+        )
+
+        result = self.get(f"/data/timers?date={query_date}&embed_task=true")
+        self.assertEqual(len(result), 2)
+        self.assertIn("task", result[0])
 
     def test_update_timer_end_time(self):
         # create a timer

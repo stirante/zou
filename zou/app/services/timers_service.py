@@ -1,16 +1,18 @@
-from zou.app.models.timer import Timer
+import datetime
+
+from pytz import UTC
+from pytz import timezone as pytz_timezone
+
 from zou.app.models.task import Task
 from zou.app.models.time_spent import TimeSpent
-from zou.app.utils import (
-    events,
-    date_helpers,
-    query as query_utils,
-)
-from zou.app.services import persons_service, user_service, tasks_service
+from zou.app.models.timer import Timer
+from zou.app.services import persons_service, tasks_service, user_service
 from zou.app.services.exception import (
     TimerNotFoundException,
     WrongParameterException,
 )
+from zou.app.utils import date_helpers, events, fields
+from zou.app.utils import query as query_utils
 
 
 class TimerAlreadyStopped(Exception):
@@ -51,7 +53,7 @@ def end_timer(timer_id=None):
     now = date_helpers.get_utc_now_datetime()
     timer.end_time = now
     timer.save()
-    duration = (timer.end_time - timer.start_time).total_seconds()
+    duration = (timer.end_time - timer.start_time).total_minutes()
     time_spent = TimeSpent.create(
         task_id=timer.task_id,
         person_id=timer.person_id,
@@ -136,12 +138,10 @@ def update_timer(timer_id, start_time=None, end_time=None):
     new_start = start_time if start_time is not None else timer.start_time
     new_end = end_time if end_time is not None else timer.end_time
 
-    #  is the NEW interval entirely inside an existing timer? 
-    container_q = (
-        Timer.query
-        .filter(Timer.person_id == timer.person_id, Timer.id != timer.id)
-        .filter(Timer.start_time <= new_start)
-    )
+    #  is the NEW interval entirely inside an existing timer?
+    container_q = Timer.query.filter(
+        Timer.person_id == timer.person_id, Timer.id != timer.id
+    ).filter(Timer.start_time <= new_start)
     if new_end is None:
         # this timer is still open -> any other still-open timer that started earlier encloses it
         container_q = container_q.filter(Timer.end_time.is_(None))
@@ -162,11 +162,11 @@ def update_timer(timer_id, start_time=None, end_time=None):
         raise WrongParameterException("End time must be after start time")
 
     # Check if other timers are inside the new start and end times
-    contained = _find_timers_inside(timer.person_id, new_start, new_end, timer.id)
+    contained = _find_timers_inside(
+        timer.person_id, new_start, new_end, timer.id
+    )
     if contained:
-        raise WrongParameterException(
-            "Timer cannot be inside another timer"
-        )
+        raise WrongParameterException("Timer cannot be inside another timer")
 
     # Adjust other timers if the new start or end time overlaps with them
     if start_time is not None:
@@ -203,7 +203,7 @@ def update_timer(timer_id, start_time=None, end_time=None):
     project_id = str(Task.get(timer.task_id).project_id)
 
     if timer.end_time is not None:
-        duration = (timer.end_time - timer.start_time).total_seconds()
+        duration = (timer.end_time - timer.start_time).total_minutes()
         time_spent = TimeSpent.get_by(timer_id=timer.id)
         if time_spent is None:
             time_spent = TimeSpent.create(
@@ -254,26 +254,33 @@ def get_timers_for_task(task_id, page=0, limit=None):
     return query_utils.get_paginated_results(query, page, limit)
 
 
-def get_timers_for_user(person_id, page=0, limit=None, embed_task=False):
-    """Return timers for a given user with optional pagination.
+def get_timers_for_user(person_id, date=None, embed_task=False):
+    """Return timers for a given user filtered by day.
 
     Timers are ordered by start time descending. When ``embed_task`` is True,
-    each timer dict includes a ``task`` field containing the serialized task
-    it is related to.
+    each timer dict includes a ``task`` field containing the serialized task it
+    is related to.
     """
 
-    query = Timer.query.filter(Timer.person_id == person_id).order_by(
-        Timer.start_time.desc()
-    )
+    query = Timer.query.filter(Timer.person_id == person_id)
 
-    results = query_utils.get_paginated_results(query, page, limit)
+    if date is not None:
+        day = date_helpers.get_date_from_string(date)
+        tz = pytz_timezone(str(user_service.get_timezone()))
+        start_local = tz.localize(
+            datetime.datetime.combine(day, datetime.time.min)
+        )
+        end_local = start_local + datetime.timedelta(days=1)
+        start_utc = start_local.astimezone(pytz.UTC).replace(tzinfo=None)
+        end_utc = end_local.astimezone(pytz.UTC).replace(tzinfo=None)
+        query = query.filter(
+            Timer.start_time >= start_utc, Timer.start_time < end_utc
+        )
+
+    query = query.order_by(Timer.start_time.desc())
+    timers = fields.serialize_models(query.all())
 
     if embed_task:
-        if page < 1:
-            timers = results
-        else:
-            timers = results["data"]
-
         cache = {}
         for timer in timers:
             task_id = timer["task_id"]
@@ -281,7 +288,7 @@ def get_timers_for_user(person_id, page=0, limit=None, embed_task=False):
                 cache[task_id] = tasks_service.get_task(task_id)
             timer["task"] = cache[task_id]
 
-    return results
+    return timers
 
 
 def _find_timers_inside(person_id, outer_start, outer_end, exclude_id):
@@ -298,19 +305,19 @@ def _find_timers_inside(person_id, outer_start, outer_end, exclude_id):
     q = Timer.query.filter(
         Timer.person_id == person_id,
         Timer.id != exclude_id,
-        Timer.start_time >= outer_start,   # starts after / at outer_start
+        Timer.start_time >= outer_start,  # starts after / at outer_start
     )
 
-    if outer_end is None:                 # edited timer is still running
+    if outer_end is None:  # edited timer is still running
         now = date_helpers.get_utc_now_datetime()
         q = q.filter(
-            (Timer.end_time.is_(None))    # running
-            | (Timer.end_time <= now)     # closed before "now"
+            (Timer.end_time.is_(None))  # running
+            | (Timer.end_time <= now)  # closed before "now"
         )
     else:
         q = q.filter(
             Timer.end_time.isnot(None),
-            Timer.end_time <= outer_end   # finishes before / at outer_end
+            Timer.end_time <= outer_end,  # finishes before / at outer_end
         )
 
     return q.all()

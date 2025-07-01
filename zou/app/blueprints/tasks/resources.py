@@ -1,24 +1,18 @@
 import datetime
 
-
 from flask import abort, request
-from flask_restful import Resource, inputs
 from flask_jwt_extended import jwt_required
+from flask_restful import Resource, inputs
 
-from zou.app.services.exception import (
-    TaskNotFoundException,
-    PersonNotFoundException,
-    MalformedFileTreeException,
-    WrongDateFormatException,
-    WrongParameterException,
-)
+from zou.app.mixin import ArgsMixin
 from zou.app.services import (
     assets_service,
+    concepts_service,
     deletion_service,
     edits_service,
     entities_service,
-    files_service,
     file_tree_service,
+    files_service,
     notifications_service,
     persons_service,
     preview_files_service,
@@ -27,10 +21,15 @@ from zou.app.services import (
     tasks_service,
     timers_service,
     user_service,
-    concepts_service,
 )
-from zou.app.utils import events, query, permissions, date_helpers
-from zou.app.mixin import ArgsMixin
+from zou.app.services.exception import (
+    MalformedFileTreeException,
+    PersonNotFoundException,
+    TaskNotFoundException,
+    WrongDateFormatException,
+    WrongParameterException,
+)
+from zou.app.utils import date_helpers, events, permissions, query
 
 
 class AddPreviewResource(Resource, ArgsMixin):
@@ -1372,11 +1371,10 @@ class UserTimersResource(Resource, ArgsMixin):
         """Return timers for the current user."""
 
         current_user = persons_service.get_current_user()
-        page = self.get_page()
-        limit = self.get_limit()
+        date = self.get_text_parameter("date")
         embed_task = self.get_bool_parameter("embed_task", "false")
         return timers_service.get_timers_for_user(
-            current_user["id"], page, limit, embed_task
+            current_user["id"], date=date, embed_task=embed_task
         )
 
 
