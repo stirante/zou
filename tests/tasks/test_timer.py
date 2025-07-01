@@ -33,7 +33,8 @@ class TimerTestCase(ApiDBTestCase):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer = Timer.get_by(person_id=self.person.id, end_time=None)
         self.assertIsNotNone(timer)
-        time.sleep(1)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
         self.post("/actions/tasks/timer/end", {})
         timer = Timer.get(timer.id)
         self.assertIsNotNone(timer.end_time)
@@ -62,7 +63,7 @@ class TimerTestCase(ApiDBTestCase):
         )
         self.post("/actions/tasks/timer/end", {})
         ts = TimeSpent.get_by(timer_id=timer.id)
-        self.assertGreaterEqual(ts.duration, 3600)
+        self.assertGreaterEqual(ts.duration, 60)
 
     def test_edit_timer_denied_for_other_user(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
@@ -80,6 +81,9 @@ class TimerTestCase(ApiDBTestCase):
 
         for task in [self.task, second_task]:
             self.post(f"/actions/tasks/{task.id}/timer/start", {})
+            timer = Timer.get_by(person_id=self.person.id, end_time=None)
+            timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+            timer.save()
             self.post("/actions/tasks/timer/end", {})
 
         first_timer = Timer.query.order_by(Timer.start_time).first()
@@ -123,7 +127,7 @@ class TimerTestCase(ApiDBTestCase):
         timer = Timer.get(timer.id)
 
         new_end = date_helpers.get_utc_now_datetime() - datetime.timedelta(
-            seconds=50
+            minutes=50
         )
 
         # patch
@@ -138,7 +142,7 @@ class TimerTestCase(ApiDBTestCase):
 
         self.assertAlmostEqual(
             ts.duration,
-            (new_end - timer.start_time).total_seconds(),
+            round((new_end - timer.start_time).total_seconds() / 60),
             delta=1,
         )
         task = Task.get(timer.task_id)
@@ -147,7 +151,8 @@ class TimerTestCase(ApiDBTestCase):
     def test_delete_timer(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer = Timer.get_by(person_id=self.person.id, end_time=None)
-        time.sleep(1)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
         self.post("/actions/tasks/timer/end", {})
         ts = TimeSpent.get_by(timer_id=timer.id)
         task = Task.get(timer.task_id)
@@ -161,6 +166,8 @@ class TimerTestCase(ApiDBTestCase):
     def test_update_timer_inside_other_error(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer1 = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer1.start_time = timer1.start_time - datetime.timedelta(minutes=1)
+        timer1.save()
         self.post("/actions/tasks/timer/end", {})
 
         start1 = datetime.datetime(2020, 1, 3, 10, 0, 0)
@@ -175,11 +182,12 @@ class TimerTestCase(ApiDBTestCase):
 
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer2 = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer2.start_time = timer2.start_time - datetime.timedelta(minutes=1)
+        timer2.save()
         self.post("/actions/tasks/timer/end", {})
 
         start2 = datetime.datetime(2020, 1, 3, 10, 30, 0)
         end2 = datetime.datetime(2020, 1, 3, 11, 0, 0)
-        # This actually returns a 200 OK, but should fail with 400
         self.patch(
             f"/actions/tasks/timer/{timer2.id}",
             {
@@ -192,6 +200,8 @@ class TimerTestCase(ApiDBTestCase):
     def test_update_timer_end_before_start_error(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
         self.post("/actions/tasks/timer/end", {})
 
         start = datetime.datetime(2020, 1, 4, 10, 0, 0)
@@ -208,6 +218,8 @@ class TimerTestCase(ApiDBTestCase):
     def test_update_timer_future_time_error(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
         self.post("/actions/tasks/timer/end", {})
 
         future = date_helpers.get_utc_now_datetime() + datetime.timedelta(
@@ -222,6 +234,8 @@ class TimerTestCase(ApiDBTestCase):
     def test_update_timer_zero_duration_error(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
         self.post("/actions/tasks/timer/end", {})
 
         start = datetime.datetime(2020, 1, 5, 10, 0, 0)
@@ -243,7 +257,8 @@ class TimerTestCase(ApiDBTestCase):
         # 1.  create a closed timer:  t_closed = [-60 s ... now-10 s]
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         t_closed = Timer.get_by(person_id=self.person.id, end_time=None)
-        time.sleep(1)
+        t_closed.start_time = t_closed.start_time - datetime.timedelta(minutes=1)
+        t_closed.save()
         self.post("/actions/tasks/timer/end", {})  # close it
 
         # 2.  create a new *running* timer that starts after the closed one
@@ -269,16 +284,18 @@ class TimerTestCase(ApiDBTestCase):
         # 1.  past timer:      [-120 ... -60]
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         t_past = Timer.get_by(person_id=self.person.id, end_time=None)
-        time.sleep(1)
+        t_past.start_time = t_past.start_time - datetime.timedelta(minutes=3)
+        t_past.save()
         self.post("/actions/tasks/timer/end", {})
+        t_past.end_time = t_past.start_time - datetime.timedelta(minutes=2)
+        t_past.save()
 
         # 2.  running timer:   [now ... )
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         t_run = Timer.get_by(person_id=self.person.id, end_time=None)
+        t_run.start_time = t_run.start_time - datetime.timedelta(minutes=1)
+        t_run.save()
         original_start = t_run.start_time
-
-        # Give the clock a moment to advance so `new_end < now`.
-        time.sleep(1)
 
         # 3.  stretch *past* timer's end slightly into the running timer
         #     (1 s past the running timer's start but still *before* now)

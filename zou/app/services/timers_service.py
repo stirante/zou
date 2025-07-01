@@ -52,8 +52,11 @@ def end_timer(timer_id=None):
         raise TimerAlreadyStopped()
     now = date_helpers.get_utc_now_datetime()
     timer.end_time = now
+    duration = round((timer.end_time - timer.start_time).total_seconds() / 60)
+    if duration <= 0:
+        delete_timer(timer.id)
+        raise WrongParameterException("Timer too short")
     timer.save()
-    duration = (timer.end_time - timer.start_time).total_minutes()
     time_spent = TimeSpent.create(
         task_id=timer.task_id,
         person_id=timer.person_id,
@@ -203,7 +206,7 @@ def update_timer(timer_id, start_time=None, end_time=None):
     project_id = str(Task.get(timer.task_id).project_id)
 
     if timer.end_time is not None:
-        duration = (timer.end_time - timer.start_time).total_minutes()
+        duration = round((timer.end_time - timer.start_time).total_seconds() / 60)
         time_spent = TimeSpent.get_by(timer_id=timer.id)
         if time_spent is None:
             time_spent = TimeSpent.create(
@@ -271,8 +274,8 @@ def get_timers_for_user(person_id, date=None, embed_task=False):
             datetime.datetime.combine(day, datetime.time.min)
         )
         end_local = start_local + datetime.timedelta(days=1)
-        start_utc = start_local.astimezone(pytz.UTC).replace(tzinfo=None)
-        end_utc = end_local.astimezone(pytz.UTC).replace(tzinfo=None)
+        start_utc = start_local.astimezone(UTC).replace(tzinfo=None)
+        end_utc = end_local.astimezone(UTC).replace(tzinfo=None)
         query = query.filter(
             Timer.start_time >= start_utc, Timer.start_time < end_utc
         )
