@@ -23,6 +23,15 @@ def get_active_timer(person_id):
     return Timer.get_by(person_id=person_id, end_time=None)
 
 
+def get_running_timer(person_id):
+    """Return the current running timer for given person if any."""
+
+    timer = get_active_timer(person_id)
+    if timer is not None:
+        return timer.serialize()
+    return None
+
+
 def start_timer(task_id, person_id):
     active = get_active_timer(person_id)
     if active is not None:
@@ -206,7 +215,9 @@ def update_timer(timer_id, start_time=None, end_time=None):
     project_id = str(Task.get(timer.task_id).project_id)
 
     if timer.end_time is not None:
-        duration = round((timer.end_time - timer.start_time).total_seconds() / 60)
+        duration = round(
+            (timer.end_time - timer.start_time).total_seconds() / 60
+        )
         time_spent = TimeSpent.get_by(timer_id=timer.id)
         if time_spent is None:
             time_spent = TimeSpent.create(

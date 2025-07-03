@@ -1235,6 +1235,32 @@ class TimeSpentsResource(Resource):
             )
 
 
+class TimeSpentsRangeResource(Resource):
+    """Return time spents for the current user between two dates."""
+
+    def get(self):
+        arguments = self.get_args(["start_date", "end_date"])
+        start_date, end_date = arguments["start_date"], arguments["end_date"]
+        if None in [start_date, end_date]:
+            abort(
+                400,
+                "If querying for a range of dates, both a `start_date` and an `end_date` must be given.",
+            )
+
+        current_user = persons_service.get_current_user()
+        try:
+            return time_spents_service.get_time_spents_range(
+                current_user["id"], start_date, end_date
+            )
+        except WrongDateFormatException:
+            abort(
+                400,
+                "Wrong date format for {} and/or {}".format(
+                    start_date, end_date
+                ),
+            )
+
+
 class DateTimeSpentsResource(Resource):
     """
     Get time spents on for current user and given date.

@@ -41,6 +41,7 @@ from zou.app.blueprints.tasks.resources import (
     PersonsTasksDatesResource,
     CreateConceptTasksResource,
     OpenTasksStatsResource,
+    RunningTimerResource,
 )
 
 
@@ -98,6 +99,7 @@ routes = [
     ("/actions/tasks/<task_id>/timer/start", StartTimerResource),
     ("/actions/tasks/timer/end", EndTimerResource),
     ("/actions/tasks/timer/discard", DiscardTimerResource),
+    ("/data/timers/current", RunningTimerResource),
     ("/actions/tasks/timer/<timer_id>", TimerResource),
     (
         "/actions/tasks/<task_id>/comments/<comment_id>/add-preview",

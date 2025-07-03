@@ -316,3 +316,16 @@ class TimerTestCase(ApiDBTestCase):
         self.assertAlmostEqual(
             t_past.end_time, new_end, delta=datetime.timedelta(seconds=1)
         )
+
+    def test_get_running_timer(self):
+        self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
+        timer_object = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer_object.start_time = timer_object.start_time - datetime.timedelta(
+            minutes=1
+        )
+        timer_object.save()
+        timer = self.get("/data/timers/current")
+        self.assertIsNotNone(timer)
+        self.post("/actions/tasks/timer/end", {})
+        timer = self.get("/data/timers/current")
+        self.assertIsNone(timer)

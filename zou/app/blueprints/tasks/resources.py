@@ -1333,6 +1333,15 @@ class DiscardTimerResource(Resource):
         return "", 204
 
 
+class RunningTimerResource(Resource):
+    @jwt_required()
+    def get(self):
+        """Return the currently running timer for the logged user."""
+
+        current_user = persons_service.get_current_user()
+        return timers_service.get_running_timer(current_user["id"])
+
+
 class TimerResource(Resource, ArgsMixin):
     @jwt_required()
     def patch(self, timer_id):
