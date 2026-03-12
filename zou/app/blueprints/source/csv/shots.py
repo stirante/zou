@@ -27,28 +27,69 @@ from zou.app.utils import events, string
 class ShotsCsvImportResource(BaseCsvProjectImportResource):
     def post(self, project_id):
         """
-        Import project shots via a .csv file.
+        Import shots csv
         ---
         tags:
           - Import
+        description: Import project shots from a CSV file. Creates or updates
+          shots based on CSV rows. Supports sequences, episodes, and task
+          status updates.
         consumes:
           - multipart/form-data
         parameters:
           - in: path
             name: project_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: update
+            required: false
+            schema:
+              type: boolean
+            default: false
+            example: false
+            description: Whether to update existing shots
           - in: formData
             name: file
             type: file
             required: true
+            description: CSV file with shot data
         responses:
             201:
-                description: The lists of imported assets.
+              description: Shots imported successfully
+              content:
+                application/json:
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                          example: a24a6ea4-ce75-4665-a070-57453082c25
+                        name:
+                          type: string
+                          example: SH010
+                        project_id:
+                          type: string
+                          format: uuid
+                          example: b24a6ea4-ce75-4665-a070-57453082c25
+                        parent_id:
+                          type: string
+                          format: uuid
+                          example: c24a6ea4-ce75-4665-a070-57453082c25
+                        nb_frames:
+                          type: integer
+                          example: 120
+                        description:
+                          type: string
+                          example: Shot description
             400:
-                description: The .csv file is not properly formatted.
+              description: Invalid CSV format or missing required columns
         """
         return super().post(project_id)
 
@@ -228,6 +269,10 @@ class ShotsCsvImportResource(BaseCsvProjectImportResource):
         fps = row.get("FPS", None)
         if fps is not None:
             shot_new_values["data"]["fps"] = fps
+
+        resolution = row.get("Resolution", None)
+        if resolution is not None:
+            shot_new_values["data"]["resolution"] = resolution
 
         for name, descriptor in self.descriptor_fields.items():
             if name in row:

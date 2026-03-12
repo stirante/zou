@@ -1,4 +1,5 @@
 from sqlalchemy_utils import UUIDType, ChoiceType
+from sqlalchemy.dialects.postgresql import JSONB
 
 from zou.app import db
 from zou.app.models.serializer import SerializerMixin
@@ -45,6 +46,7 @@ class PreviewFile(db.Model, BaseMixin, SerializerMixin):
     width = db.Column(db.Integer(), default=0)
     height = db.Column(db.Integer(), default=0)
     duration = db.Column(db.Float, default=0)
+    data = db.Column(JSONB)
 
     task_id = db.Column(
         UUIDType(binary=False), db.ForeignKey("task.id"), index=True
@@ -97,5 +99,16 @@ class PreviewFile(db.Model, BaseMixin, SerializerMixin):
                 "task_id": self.task_id,
                 "person_id": self.person_id,
                 "created_at": self.created_at,
+            }
+        )
+
+    def present_minimal(self):
+        return fields.serialize_dict(
+            {
+                "id": self.id,
+                "name": self.name,
+                "extension": self.extension,
+                "revision": self.revision,
+                "position": self.position,
             }
         )

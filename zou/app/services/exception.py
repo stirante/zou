@@ -93,6 +93,10 @@ class SoftwareNotFoundException(NotFound):
     pass
 
 
+class HardwareItemNotFoundException(NotFound):
+    pass
+
+
 class OutputTypeNotFoundException(NotFound):
     pass
 
@@ -105,7 +109,15 @@ class PreviewFileReuploadNotAllowedException(BadRequest):
     pass
 
 
+class RevisionAlreadyExistsException(BadRequest):
+    pass
+
+
 class CommentNotFoundException(NotFound):
+    pass
+
+
+class ReplyNotFoundException(NotFound):
     pass
 
 
@@ -243,6 +255,14 @@ class NoTwoFactorAuthenticationEnabled(Exception):
     pass
 
 
+class TwoFactorAuthenticationRequiredException(Exception):
+    """
+    Exception raised when 2FA is enforced but user has not set it up.
+    """
+
+    pass
+
+
 class TooMuchLoginFailedAttemps(Exception):
     pass
 
@@ -290,4 +310,8 @@ class WrongTaskTypeForEntityException(Exception):
 
 
 class IsUserLimitReachedException(Exception):
+    pass
+
+
+class ProductionScheduleVersionNotFoundException(NotFound):
     pass

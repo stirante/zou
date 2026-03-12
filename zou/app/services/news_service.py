@@ -83,7 +83,7 @@ def delete_news_for_comment(comment_id):
 
 
 def get_last_news_for_project(
-    project_ids=[],
+    project_ids=None,
     project_id=None,
     news_id=None,
     entity_id=None,
@@ -119,7 +119,7 @@ def get_last_news_for_project(
     if project_id is not None:
         query = query.filter(Task.project_id == project_id)
 
-    if len(project_ids) > 0:
+    if project_ids and len(project_ids) > 0:
         query = query.filter(Project.id.in_(project_ids))
     elif current_user is not None:
         if current_user.role.code != "admin":
@@ -135,9 +135,7 @@ def get_last_news_for_project(
         )
 
     if task_status_id is not None:
-        query = query.filter(Comment.task_status_id == task_status_id).filter(
-            News.change == True
-        )
+        query = query.filter(Comment.task_status_id == task_status_id)
 
     if task_type_id is not None:
         query = query.filter(Task.task_type_id == task_type_id)
@@ -169,6 +167,7 @@ def get_last_news_for_project(
         Task.entity_id,
         PreviewFile.extension,
         PreviewFile.annotations,
+        PreviewFile.revision,
         Entity.preview_file_id,
     )
 
@@ -187,6 +186,7 @@ def get_last_news_for_project(
         task_entity_id,
         preview_file_extension,
         preview_file_annotations,
+        preview_file_revision,
         entity_preview_file_id,
     ) in news_list:
         full_entity_name, episode_id, _ = names_service.get_full_entity_name(
@@ -206,7 +206,7 @@ def get_last_news_for_project(
                     "task_entity_id": task_entity_id,
                     "preview_file_id": news.preview_file_id,
                     "preview_file_extension": preview_file_extension,
-                    "preview_file_annotations": preview_file_annotations,
+                    "preview_file_revision": preview_file_revision,
                     "project_id": project_id,
                     "project_name": project_name,
                     "created_at": news.created_at,
@@ -217,6 +217,30 @@ def get_last_news_for_project(
                 }
             )
         )
+
+    if only_preview:
+        task_ids = [
+            news["task_id"] for news in result if news["task_id"] is not None
+        ]
+        revisions = [news["preview_file_revision"] for news in result]
+        preview_files = (
+            PreviewFile.query.filter(PreviewFile.task_id.in_(task_ids))
+            .filter(PreviewFile.revision.in_(revisions))
+            .order_by(
+                PreviewFile.task_id, PreviewFile.revision, PreviewFile.position
+            )
+        )
+        preview_files_map = {}
+        for preview_file in preview_files:
+            key = f"{str(preview_file.task_id)}-{preview_file.revision}"
+            if not key in preview_files_map:
+                preview_files_map[key] = []
+            preview_files_map[key].append(preview_file.present_minimal())
+
+        for entry in result:
+            key = f"{entry['task_id']}-{entry['preview_file_revision']}"
+            entry["preview_files"] = preview_files_map.get(key, [])
+
     return {
         "data": result,
         "total": total,
@@ -265,7 +289,7 @@ def get_news_stats_for_project(
     if project_id is not None:
         query = query.filter(Task.project_id == project_id)
 
-    if len(project_ids) > 0:
+    if project_ids and len(project_ids) > 0:
         query = query.filter(Project.id.in_(project_ids))
     elif current_user is not None:
         if current_user.role.code != "admin":

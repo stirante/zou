@@ -1,12 +1,12 @@
 import datetime
+import logging
 import urllib.parse
 
+from babel.dates import format_datetime
 from calendar import monthrange
 from dateutil import relativedelta
 
 from sqlalchemy.exc import StatementError
-
-from babel.dates import format_datetime
 
 from flask_jwt_extended import create_access_token, get_jti, current_user
 
@@ -16,9 +16,10 @@ from zou.app.models.organisation import Organisation
 from zou.app.models.person import Person
 from zou.app.models.time_spent import TimeSpent
 
-from zou.app import config, file_store
+from zou.app import config, file_store, db
 from zou.app.utils import fields, events, cache, emails, date_helpers
-from zou.app.services import index_service, auth_service
+from zou.app.utils.email_i18n import get_email_translation
+from zou.app.services import index_service, auth_service, templates_service
 from zou.app.stores import auth_tokens_store
 from zou.app.services.exception import (
     PersonNotFoundException,
@@ -26,8 +27,11 @@ from zou.app.services.exception import (
     WrongParameterException,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def clear_person_cache():
+    cache.cache.delete_memoized(_get_person_raw_for_cache)
     cache.cache.delete_memoized(get_person)
     cache.cache.delete_memoized(get_person_by_email)
     cache.cache.delete_memoized(get_person_by_desktop_login)
@@ -74,6 +78,50 @@ def get_active_persons():
         .all()
     )
     return fields.serialize_models(persons)
+
+
+@cache.memoize_function(60)
+def _get_person_raw_for_cache(person_id):
+    """
+    Internal function to get person and prepare it for caching.
+    Expunges the object from session so it can be safely cached.
+    This function is cached - it returns a detached Person object.
+
+    Note: We don't pre-load departments here to avoid stale department data.
+    Departments will be loaded fresh after merging into the session.
+    """
+    if person_id is None:
+        raise PersonNotFoundException()
+
+    try:
+        person = Person.get(person_id)
+    except StatementError:
+        raise PersonNotFoundException()
+
+    if person is None:
+        raise PersonNotFoundException()
+
+    # Don't load departments here - we'll load them fresh after merging
+    # This ensures departments are always up-to-date even if cached
+
+    # Expunge from session so it can be cached without session conflicts
+    # This is cheap - just removes from identity map, no DB query
+    db.session.expunge(person)
+    return person
+
+
+def get_person_raw_cached(person_id):
+    """
+    Return given person as an active record, cached and merged into current session.
+    This avoids session conflicts by caching expunged objects and merging on retrieval.
+
+    Uses load=False to avoid database query on merge - we trust the cached data.
+    Departments are loaded fresh after merging to ensure they're up-to-date.
+    """
+    cached_person = _get_person_raw_for_cache(person_id)
+    # Merge into current session with load=False to avoid DB query
+    merged_person = db.session.merge(cached_person, load=False)
+    return merged_person
 
 
 def get_person_raw(person_id):
@@ -149,10 +197,21 @@ def get_current_user(unsafe=False, relations=False):
     Return person from its auth token (the one that does the request) as a
     dictionary.
     """
+    data = current_user.serialize_safe(relations=relations)
     if unsafe:
-        return current_user.serialize(relations=relations)
-    else:
-        return current_user.serialize_safe(relations=relations)
+        data["totp_secret"] = current_user.totp_secret
+        data["email_otp_secret"] = current_user.email_otp_secret
+        data["otp_recovery_codes"] = current_user.otp_recovery_codes
+        data["fido_credentials"] = current_user.fido_credentials
+        data["fido_devices"] = current_user.fido_devices()
+    return data
+
+
+def get_current_user_fido_devices():
+    """
+    Return FIDO device names for the current user.
+    """
+    return current_user.fido_devices()
 
 
 def get_current_user_raw():
@@ -160,6 +219,16 @@ def get_current_user_raw():
     Return person from its auth token (the one that does the request) as an
     active record.
     """
+    # current_user is already a Person object from the auth callback
+    # which uses get_person_raw_cached(). However, when merging with load=False,
+    # relationships might not be loaded. We need to ensure departments are loaded.
+    # Accessing departments triggers lazy loading if not already loaded.
+    # Convert to list to force evaluation and ensure departments are loaded
+    _ = (
+        list(current_user.departments)
+        if hasattr(current_user, "departments")
+        else []
+    )
     return current_user
 
 
@@ -206,7 +275,7 @@ def create_person(
     phone="",
     role="user",
     desktop_login="",
-    departments=[],
+    departments=None,
     is_generated_from_ldap=False,
     ldap_uid=None,
     is_bot=False,
@@ -219,21 +288,25 @@ def create_person(
     Create a new person entry in the database. No operation are performed on
     password, so encrypted password is expected.
     """
+    if departments is None:
+        departments = []
     if email is not None:
         email = email.strip()
 
     if expiration_date is not None:
+        if isinstance(expiration_date, str):
+            expiration_date = date_helpers.get_date_from_string(
+                expiration_date
+            )
         try:
-            if (
-                date_helpers.get_date_from_string(expiration_date).date()
-                < datetime.date.today()
-            ):
+            if expiration_date.date() < datetime.date.today():
                 raise WrongParameterException(
                     "Expiration date can't be in the past."
                 )
         except WrongParameterException:
             raise
-        except:
+        except (ValueError, TypeError) as e:
+            logger.warning("Invalid expiration_date for create_person: %s", e)
             raise WrongParameterException("Expiration date is not valid.")
 
     person = Person.create(
@@ -257,6 +330,10 @@ def create_person(
     index_service.index_person(person)
     events.emit("person:new", {"person_id": person.id})
     clear_person_cache()
+    logger.info(
+        "Person created",
+        extra={"person_id": str(person.id), "email": email},
+    )
     if serialize:
         if is_bot:
             return {
@@ -276,6 +353,7 @@ def update_password(email, password):
     person = get_person_by_email_raw(email)
     person.update({"password": password})
     clear_person_cache()
+    logger.info("Password updated", extra={"email": email})
     return person.serialize()
 
 
@@ -287,6 +365,7 @@ def update_person(person_id, data, bypass_protected_accounts=False):
     if (
         not bypass_protected_accounts
         and person.email in config.PROTECTED_ACCOUNTS
+        and not person.is_bot
     ):
         message = None
         if data.get("active") is False:
@@ -315,7 +394,12 @@ def update_person(person_id, data, bypass_protected_accounts=False):
                 )
         except WrongParameterException:
             raise
-        except:
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                "Invalid expiration_date for update_person %s: %s",
+                person_id,
+                e,
+            )
             raise WrongParameterException("Expiration date is not valid.")
 
     person.update(data)
@@ -346,6 +430,7 @@ def delete_person(person_id):
     index_service.remove_person_index(person_id)
     events.emit("person:delete", {"person_id": person_id})
     clear_person_cache()
+    logger.info("Person deleted", extra={"person_id": str(person_id)})
     return person_dict
 
 
@@ -373,10 +458,18 @@ def create_desktop_login_logs(person_id, date):
 def update_person_last_presence(person_id):
     """
     Update person presence field with the most recent time spent or
-    desktop login log.
+    desktop login log for this person.
     """
-    log = DesktopLoginLog.query.order_by(DesktopLoginLog.date.desc()).first()
-    time_spent = TimeSpent.query.order_by(TimeSpent.date.desc()).first()
+    log = (
+        DesktopLoginLog.query.filter(DesktopLoginLog.person_id == person_id)
+        .order_by(DesktopLoginLog.date.desc())
+        .first()
+    )
+    time_spent = (
+        TimeSpent.query.filter(TimeSpent.person_id == person_id)
+        .order_by(TimeSpent.date.desc())
+        .first()
+    )
     date = None
     if (
         log is not None
@@ -400,7 +493,7 @@ def get_presence_logs(year, month):
     headers = [str(year)]
     csv_content = []
 
-    (_, limit) = monthrange(year, month)
+    _, limit = monthrange(year, month)
     headers += [str(i) for i in range(1, limit + 1)]
     start_date = datetime.datetime(year, month, 1, 0, 0, 0)
     end_date = datetime.date.today() + relativedelta.relativedelta(months=1)
@@ -441,11 +534,7 @@ def invite_person(person_id):
     auth_tokens_store.add(
         "reset-token-%s" % person["email"], token, ttl=3600 * 24 * 7
     )
-    subject = (
-        "You are invited by %s to join their Kitsu production tracker"
-        % (organisation["name"])
-    )
-    params = {"email": person["email"], "token": token}
+    params = {"email": person["email"], "token": token, "type": "new"}
     query = urllib.parse.urlencode(params)
     reset_url = "%s://%s/reset-change-password?%s" % (
         config.DOMAIN_PROTOCOL,
@@ -453,35 +542,95 @@ def invite_person(person_id):
         query,
     )
 
+    locale = person.get("locale") or getattr(config, "DEFAULT_LOCALE", "en_US")
+    if hasattr(locale, "language"):
+        locale = str(locale)
+    subject = get_email_translation(
+        locale,
+        "auth_invitation_subject",
+        organisation_name=organisation["name"],
+    )
+    title = get_email_translation(locale, "auth_invitation_title")
+    html = get_email_translation(
+        locale,
+        "auth_invitation_body",
+        first_name=person["first_name"],
+        organisation_name=organisation["name"],
+        email=person["email"],
+        reset_url=reset_url,
+    )
+    email_html_body = templates_service.generate_html_body(
+        title, html, locale=locale
+    )
+    emails.send_email(subject, email_html_body, person["email"], locale=locale)
+
+
+def send_password_changed_by_admin_email(person, admin_user, person_IP=None):
+    """
+    Send an email to the person notifying that an admin changed their password.
+    """
+    organisation = get_organisation()
+    locale = person.get("locale") or getattr(config, "DEFAULT_LOCALE", "en_US")
+    if hasattr(locale, "language"):
+        locale = str(locale)
     time_string = format_datetime(
         date_helpers.get_utc_now_datetime(),
-        tzinfo=person["timezone"],
-        locale=person["locale"],
+        tzinfo=person.get("timezone"),
+        locale=person.get("locale"),
     )
+    person_IP = person_IP or ""
+    subject = get_email_translation(
+        locale,
+        "auth_password_changed_by_admin_subject",
+        organisation_name=organisation["name"],
+    )
+    title = get_email_translation(
+        locale, "auth_password_changed_by_admin_title"
+    )
+    html = get_email_translation(
+        locale,
+        "auth_password_changed_by_admin_body",
+        first_name=person["first_name"],
+        time_string=time_string,
+        person_IP=person_IP,
+    )
+    email_html_body = templates_service.generate_html_body(
+        title, html, locale=locale
+    )
+    emails.send_email(subject, email_html_body, person["email"], locale=locale)
 
-    html = f"""<p>Hello {person["first_name"]},</p>
-<p>
-You are invited by {organisation["name"]} to collaborate on their Kitsu production tracker.
-</p>
-<p>
-Your login is: <strong>{person["email"]}</strong>
-</p>
-<p>
-You are invited to set your password by following this link: <a href="{reset_url}">{reset_url}</a>
-</p>
-<p>
-This link will expire after one week. After, you have to request to reset your password.
-The invitation was sent at this date: {time_string}.
-</p>
-<p>
-Thank you and see you soon on Kitsu,
-</p>
-<p>
-{organisation["name"]} Team
-</p>
-"""
 
-    emails.send_email(subject, html, person["email"])
+def send_2fa_disabled_by_admin_email(person, admin_user, person_IP=None):
+    """
+    Send an email to the person notifying that an admin disabled their 2FA.
+    """
+    organisation = get_organisation()
+    locale = person.get("locale") or getattr(config, "DEFAULT_LOCALE", "en_US")
+    if hasattr(locale, "language"):
+        locale = str(locale)
+    time_string = format_datetime(
+        date_helpers.get_utc_now_datetime(),
+        tzinfo=person.get("timezone"),
+        locale=person.get("locale"),
+    )
+    person_IP = person_IP or ""
+    subject = get_email_translation(
+        locale,
+        "auth_2fa_disabled_by_admin_subject",
+        organisation_name=organisation["name"],
+    )
+    title = get_email_translation(locale, "auth_2fa_disabled_by_admin_title")
+    html = get_email_translation(
+        locale,
+        "auth_2fa_disabled_by_admin_body",
+        first_name=person["first_name"],
+        time_string=time_string,
+        person_IP=person_IP,
+    )
+    email_html_body = templates_service.generate_html_body(
+        title, html, locale=locale
+    )
+    emails.send_email(subject, email_html_body, person["email"], locale=locale)
 
 
 @cache.memoize_function(120)
@@ -554,7 +703,7 @@ def clear_avatar(person_id):
     if config.REMOVE_FILES:
         try:
             file_store.remove_picture("thumbnails", person_id)
-        except BaseException:
+        except Exception:
             pass
     return person.serialize()
 

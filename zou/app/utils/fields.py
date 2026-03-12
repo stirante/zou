@@ -1,12 +1,18 @@
 import datetime
-import re
-import uuid
-import sqlalchemy.orm as orm
 
-from pytz import tzinfo
+import re
+import sqlalchemy.orm as orm
+import uuid
+
 from babel import Locale
+from enum import Enum
 from ipaddress import IPv4Address
+from pytz import tzinfo
 from sqlalchemy_utils.types.choice import Choice
+
+_UUID_RE = re.compile(
+    r"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
+)
 
 
 def serialize_value(value, milliseconds=False):
@@ -37,15 +43,14 @@ def serialize_value(value, milliseconds=False):
         return str(value)
     elif isinstance(value, Choice):
         return value.code
+    elif isinstance(value, Enum):
+        return value.value
     elif isinstance(value, IPv4Address):
         return str(value)
     elif value is None:
         return None
-    elif isinstance(value, object):
-        if hasattr(value, "serialize"):
-            return value.serialize()
-        else:
-            return value
+    elif hasattr(value, "serialize"):
+        return value.serialize()
     else:
         return value
 
@@ -129,11 +134,8 @@ def get_default_date_object(date_string):
     return date_obj
 
 
-def is_valid_id(uuid):
+def is_valid_id(value):
     """
     Check if a given string is a valid UUID.
     """
-    _UUID_RE = re.compile(
-        "([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}){1}"
-    )
-    return _UUID_RE.match(uuid)
+    return _UUID_RE.match(value)

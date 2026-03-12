@@ -17,7 +17,6 @@ from zou.app.models.department import Department
 from zou.app.models.base import BaseMixin
 from zou.app import config, db
 
-
 TWO_FACTOR_AUTHENTICATION_TYPES = [
     ("totp", "TOTP"),
     ("email_otp", "Email OTP"),
@@ -138,7 +137,7 @@ class Person(db.Model, BaseMixin, SerializerMixin):
     expiration_date = db.Column(db.Date(), nullable=True)
 
     departments = db.relationship(
-        "Department", secondary="department_link", lazy="joined"
+        "Department", secondary=DepartmentLink.__table__, lazy="selectin"
     )
     studio_id = db.Column(
         UUIDType(binary=False), db.ForeignKey("studio.id"), index=True
@@ -183,24 +182,19 @@ class Person(db.Model, BaseMixin, SerializerMixin):
                 for credential in self.fido_credentials
             ]
 
-    def serialize(
-        self, obj_type="Person", relations=False, milliseconds=False
-    ):
-        data = SerializerMixin.serialize(
-            self, obj_type, relations=relations, milliseconds=milliseconds
+    def serialize_safe(self, **kwargs):
+        return super().serialize(
+            ignored_attrs=[
+                "password",
+                "totp_secret",
+                "email_otp_secret",
+                "otp_recovery_codes",
+                "fido_credentials",
+                "fido_devices",
+                "jti",
+            ],
+            **kwargs,
         )
-        data["fido_devices"] = self.fido_devices()
-        return data
-
-    def serialize_safe(self, relations=False, milliseconds=False):
-        data = self.serialize(relations=relations, milliseconds=milliseconds)
-        del data["password"]
-        del data["totp_secret"]
-        del data["email_otp_secret"]
-        del data["otp_recovery_codes"]
-        del data["fido_credentials"]
-        del data["jti"]
-        return data
 
     def present_minimal(self, relations=False, milliseconds=False):
         data = SerializerMixin.serialize(

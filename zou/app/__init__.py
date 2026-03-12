@@ -1,7 +1,7 @@
 import traceback
 import uuid
 
-from flask import Flask, jsonify, current_app
+from flask import Flask, jsonify, current_app, request
 from flasgger import Swagger
 from flask_jwt_extended import JWTManager
 from flask_principal import (
@@ -23,12 +23,15 @@ from meilisearch.errors import (
     MeilisearchCommunicationError,
 )
 
-from zou.app import config, swagger
+from zou.app import config
+from zou.app import swagger as swagger_module
+from zou.app.swagger import configure_openapi_route
 from zou.app.stores import auth_tokens_store, file_store
 from zou.app.indexer import indexing
 from zou.app.services.exception import (
     ModelWithRelationsDeletionException,
     PersonNotFoundException,
+    TwoFactorAuthenticationRequiredException,
     WrongIdFormatException,
     WrongParameterException,
     WrongTaskTypeForEntityException,
@@ -65,8 +68,12 @@ cache.cache.init_app(app)  # Function caching
 mail = Mail()
 mail.init_app(app)  # To send emails
 swagger = Swagger(
-    app, template=swagger.swagger_template, config=swagger.swagger_config
+    app,
+    template=swagger_module.swagger_template,
+    config=swagger_module.swagger_config,
 )
+configure_openapi_route(app, swagger)
+
 
 if config.SAML_ENABLED:
     app.extensions["saml_client"] = saml_client_for(config.SAML_METADATA_URL)
@@ -79,7 +86,21 @@ if config.INDEXER["key"] is not None:
 
 @app.teardown_appcontext
 def shutdown_session(exception=None):
-    db.session.remove()
+    """
+    Clean up database session when application context is torn down.
+    This ensures connections are properly returned to the pool.
+
+    Flask-SQLAlchemy automatically commits on successful requests and rolls back
+    on exceptions, but we ensure proper cleanup here to prevent connection
+    leaks.
+    """
+    try:
+        if exception is not None and db.session.is_active:
+            db.session.rollback()
+    except Exception:
+        pass
+    finally:
+        db.session.remove()
 
 
 @app.errorhandler(404)
@@ -138,6 +159,19 @@ def indexer_key_error(error):
         raise error
 
 
+@app.errorhandler(TwoFactorAuthenticationRequiredException)
+def two_factor_auth_required(error):
+    return (
+        jsonify(
+            error=True,
+            two_factor_authentication_required=True,
+            message="Two-factor authentication setup is required. "
+            "Please configure 2FA before accessing the API.",
+        ),
+        403,
+    )
+
+
 if config.DEBUG:
 
     @app.errorhandler(Exception)
@@ -165,11 +199,14 @@ def configure_auth():
 
     @jwt.token_in_blocklist_loader
     def check_if_token_is_revoked(_, payload):
+        jti = payload.get("jti")
+        if jti is None:
+            return True
         identity_type = payload.get("identity_type")
         if identity_type == "person":
-            return auth_tokens_store.is_revoked(payload["jti"])
+            return auth_tokens_store.is_revoked(jti)
         elif identity_type in ["bot", "person_api"]:
-            return persons_service.is_jti_revoked(payload["jti"])
+            return persons_service.is_jti_revoked(jti)
         else:
             return True
 
@@ -177,10 +214,25 @@ def configure_auth():
     def user_lookup_callback(_, payload):
         identity_type = payload.get("identity_type")
         try:
-            identity = persons_service.get_person_raw(payload["sub"])
+            identity = persons_service.get_person_raw_cached(payload["sub"])
         except PersonNotFoundException:
             return wrong_auth_handler()
         check_active_identity(identity, identity_type, jti=payload["jti"])
+
+        if payload.get("requires_2fa_setup"):
+            allowed_paths = {
+                "/auth/totp",
+                "/auth/email-otp",
+                "/auth/fido",
+                "/auth/recovery-codes",
+                "/auth/login",
+                "/auth/logout",
+                "/auth/authenticated",
+                "/auth/refresh-token",
+            }
+            if request.path not in allowed_paths:
+                raise TwoFactorAuthenticationRequiredException()
+
         identity_changed.send(
             current_app._get_current_object(),
             identity=Identity(identity.id, identity_type),
@@ -191,7 +243,9 @@ def configure_auth():
     def on_identity_loaded(_, identity):
         try:
             if isinstance(identity.id, (str, uuid.UUID)):
-                identity.user = persons_service.get_person_raw(identity.id)
+                identity.user = persons_service.get_person_raw_cached(
+                    identity.id
+                )
 
                 if hasattr(identity.user, "id"):
                     identity.provides.add(UserNeed(identity.user.id))
@@ -200,31 +254,29 @@ def configure_auth():
                     identity.provides.add(RoleNeed("admin"))
                     identity.provides.add(RoleNeed("manager"))
 
-                if identity.user.role == "manager":
+                elif identity.user.role == "manager":
                     identity.provides.add(RoleNeed("manager"))
 
-                if identity.user.role == "supervisor":
+                elif identity.user.role == "supervisor":
                     identity.provides.add(RoleNeed("supervisor"))
 
-                if identity.user.role == "client":
+                elif identity.user.role == "client":
                     identity.provides.add(RoleNeed("client"))
 
-                if identity.user.role == "vendor":
+                elif identity.user.role == "vendor":
                     identity.provides.add(RoleNeed("vendor"))
 
                 identity.provides.add(RoleNeed(identity.auth_type))
 
             return identity
 
+        except (PersonNotFoundException, UnactiveUserException):
+            return wrong_auth_handler()
+        except TimeoutError:
+            current_app.logger.error("Identity loading timed out")
+            return wrong_auth_handler()
         except Exception as e:
-            if isinstance(e, TimeoutError):
-                current_app.logger.error("Identity loading timed out")
-            if isinstance(e, (PersonNotFoundException, UnactiveUserException)):
-                pass
-            else:
-                current_app.logger.error(e, exc_info=1)
-                if hasattr(e, "message"):
-                    current_app.logger.error(e.message)
+            current_app.logger.error(e, exc_info=1)
             return wrong_auth_handler()
 
 

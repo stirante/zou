@@ -22,9 +22,8 @@ def check_criterion_access(criterions):
         episode_id = criterions.get("episode_id", None)
         project_id = shots_service.get_episode(episode_id)["project_id"]
 
-    if "project_id" in criterions:
+    if project_id is not None:
         user_service.check_project_access(project_id)
-
     return True
 
 
@@ -33,20 +32,56 @@ class AssetResource(Resource, ArgsMixin):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve given asset.
+        Get asset
         ---
+        description: Retrieve detailed information about a specific asset including metadata, project context, and related data
         tags:
           - Assets
         parameters:
           - in: path
             name: asset_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the asset
         responses:
           200:
-            description: Given asset
+            description: Asset information successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Asset unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    name:
+                      type: string
+                      description: Asset name
+                      example: "Character Name"
+                    project_id:
+                      type: string
+                      format: uuid
+                      description: Project identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
+                    entity_type_id:
+                      type: string
+                      format: uuid
+                      description: Asset type identifier
+                      example: c46c8gc6-eg97-6887-c292-79675204e47
+                    created_at:
+                      type: string
+                      format: date-time
+                      description: Creation timestamp
+                      example: "2023-01-01T12:00:00Z"
+                    updated_at:
+                      type: string
+                      format: date-time
+                      description: Last update timestamp
+                      example: "2023-01-01T12:30:00Z"
         """
         asset = assets_service.get_full_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -56,20 +91,28 @@ class AssetResource(Resource, ArgsMixin):
     @jwt_required()
     def delete(self, asset_id):
         """
-        Delete given asset.
+        Delete asset
         ---
+        description: Permanently remove an asset from the system. Only asset creators or project managers can delete assets
         tags:
           - Assets
         parameters:
           - in: path
             name: asset_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the asset to delete
+          - in: query
+            name: force
+            type: boolean
+            required: false
+            description: Force deletion bypassing validation checks
+            example: false
         responses:
           204:
-            description: Empty response
+            description: Asset successfully deleted
         """
         force = self.get_force()
 
@@ -88,14 +131,71 @@ class AllAssetsResource(Resource):
     @jwt_required()
     def get(self):
         """
-        Retrieve all entities that are not shot, sequence, episode, or edit.
-        Adds project name and asset type name.
+        Get all assets
         ---
+        description: Retrieve all production assets with filtering and pagination. Supports advanced filtering by project, asset type, task status, and other criteria
         tags:
           - Assets
+        parameters:
+          - in: query
+            name: project_id
+            type: string
+            format: uuid
+            description: Filter assets by specific project
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: asset_type_id
+            type: string
+            format: uuid
+            description: Filter assets by asset type
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: page
+            type: integer
+            description: Page number for pagination
+            example: 1
+          - in: query
+            name: limit
+            type: integer
+            description: Number of assets per page
+            example: 100
         responses:
           200:
-            description: All assets
+            description: List of assets successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      project_name:
+                        type: string
+                        description: Project name
+                        example: "My Project"
+                      asset_type_name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
         """
         criterions = query.get_query_criterions_from_request(request)
         check_criterion_access(criterions)
@@ -118,16 +218,72 @@ class AssetsAndTasksResource(Resource, ArgsMixin):
     @jwt_required()
     def get(self):
         """
-        Retrieve all entities that are not shot, sequence, episode, or edit.
-        Adds project name and asset type name and all related tasks.
-        If episode_id is given as parameter, it returns assets not linked
-        to an episode and assets linked to given episode.
+        Get assets with tasks
         ---
+        description: Retrieve all production assets with their related tasks. Includes project name, asset type name, and all associated tasks. Supports filtering by episode
         tags:
           - Assets
+        parameters:
+          - in: query
+            name: project_id
+            type: string
+            format: uuid
+            description: Filter assets by specific project
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: episode_id
+            type: string
+            format: uuid
+            description: Filter assets by episode (returns assets not linked to episode and assets linked to given episode)
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: asset_type_id
+            type: string
+            format: uuid
+            description: Filter assets by asset type
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
           200:
-            description: All assets with tasks
+            description: List of assets with tasks successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      project_name:
+                        type: string
+                        description: Project name
+                        example: "My Project"
+                      asset_type_name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
+                      tasks:
+                        type: array
+                        items:
+                          type: object
+                        description: Array of related tasks
         """
         criterions = query.get_query_criterions_from_request(request)
         check_criterion_access(criterions)
@@ -147,20 +303,46 @@ class AssetTypeResource(Resource):
     @jwt_required()
     def get(self, asset_type_id):
         """
-        Retrieve given asset type.
+        Get asset type
         ---
+        description: Retrieve detailed information about a specific asset type including metadata and configuration
         tags:
           - Assets
         parameters:
           - in: path
             name: asset_type_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the asset type
         responses:
           200:
             description: Given asset type
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Asset type unique identifier
+                      example: c46c8gc6-eg97-6887-c292-79675204e47
+                    name:
+                      type: string
+                      description: Asset type name
+                      example: "Character"
+                    created_at:
+                      type: string
+                      format: date-time
+                      description: Creation timestamp
+                      example: "2023-01-01T12:00:00Z"
+                    updated_at:
+                      type: string
+                      format: date-time
+                      description: Last update timestamp
+                      example: "2023-01-01T12:30:00Z"
         """
         return assets_service.get_asset_type(asset_type_id)
 
@@ -170,13 +352,47 @@ class AssetTypesResource(Resource):
     @jwt_required()
     def get(self):
         """
-        Retrieve all asset types (entity types that are not shot, sequence or episode).
+        Get asset types
         ---
+        description: Retrieve all available asset types (entity types that are not shot, sequence, or episode) with filtering support
         tags:
           - Assets
+        parameters:
+          - in: query
+            name: project_id
+            type: string
+            format: uuid
+            description: Filter asset types by project
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
           200:
-            description: All asset types
+            description: List of asset types successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset type unique identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
+                      created_at:
+                        type: string
+                        format: date-time
+                        description: Creation timestamp
+                        example: "2023-01-01T12:00:00Z"
+                      updated_at:
+                        type: string
+                        format: date-time
+                        description: Last update timestamp
+                        example: "2023-01-01T12:30:00Z"
         """
         criterions = query.get_query_criterions_from_request(request)
         return assets_service.get_asset_types(criterions)
@@ -187,20 +403,43 @@ class ProjectAssetTypesResource(Resource):
     @jwt_required()
     def get(self, project_id):
         """
-        Retrieve all asset types for given project.
+        Get project asset types
         ---
+        description: Retrieve all asset types available for a specific project
         tags:
           - Assets
         parameters:
           - in: path
             name: project_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the project
         responses:
           200:
-            description: All asset types for given project
+            description: List of project asset types successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset type unique identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
         """
         user_service.check_project_access(project_id)
         return assets_service.get_asset_types_for_project(project_id)
@@ -211,20 +450,43 @@ class ShotAssetTypesResource(Resource):
     @jwt_required()
     def get(self, shot_id):
         """
-        Retrieve all asset types of assets casted in given shot.
+        Get shot asset types
         ---
+        description: Retrieve all asset types of assets that are casted in a specific shot
         tags:
           - Assets
         parameters:
           - in: path
             name: shot_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the shot
         responses:
           200:
-            description: All asset types of assets casted in given shot
+            description: List of shot asset types successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset type unique identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
+                      shot_id:
+                        type: string
+                        format: uuid
+                        description: Shot identifier
+                        example: d57d9hd7-fh08-7998-d403-80786315f58
         """
         shot = shots_service.get_shot(shot_id)
         user_service.check_project_access(shot["project_id"])
@@ -236,20 +498,72 @@ class ProjectAssetsResource(Resource):
     @jwt_required()
     def get(self, project_id):
         """
-        Retrieve all assets for given project.
+        Get project assets
         ---
+        description: Retrieve all assets belonging to a specific project with filtering support
         tags:
           - Assets
         parameters:
           - in: path
             name: project_id
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-            required: True
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            description: Unique identifier of the project
+          - in: query
+            name: asset_type_id
+            type: string
+            format: uuid
+            description: Filter assets by asset type
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: page
+            type: integer
+            description: Page number for pagination
+            example: 1
+          - in: query
+            name: limit
+            type: integer
+            description: Number of assets per page
+            example: 100
         responses:
           200:
-            description: All assets for given project
+            description: List of project assets successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      project_name:
+                        type: string
+                        description: Project name
+                        example: "My Project"
+                      asset_type_name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
         """
         user_service.check_project_access(project_id)
         criterions = query.get_query_criterions_from_request(request)
@@ -266,26 +580,73 @@ class ProjectAssetTypeAssetsResource(Resource):
     @jwt_required()
     def get(self, project_id, asset_type_id):
         """
-        Retrieve all assets for given project and asset type.
+        Get project asset type assets
         ---
+        description: Retrieve all assets of a specific type within a project.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: path
             name: asset_type_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset type
+          - in: query
+            name: page
+            type: integer
+            description: Page number for pagination
+            example: 1
+          - in: query
+            name: limit
+            type: integer
+            description: Number of assets per page
+            example: 100
         responses:
-            200:
-                description: All assets for given project and asset type
+          200:
+            description: List of project asset type assets successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      project_name:
+                        type: string
+                        description: Project name
+                        example: "My Project"
+                      asset_type_name:
+                        type: string
+                        description: Asset type name
+                        example: "Character"
         """
         user_service.check_project_access(project_id)
         criterions = query.get_query_criterions_from_request(request)
@@ -303,20 +664,48 @@ class AssetAssetsResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all assets linked to given asset.
+        Get linked assets
         ---
+        description: Retrieve all assets that are linked to a specific asset through casting relationships
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: All assets linked to given asset
+          200:
+            description: List of linked assets successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Linked asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Linked asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -329,23 +718,84 @@ class AssetTasksResource(Resource, ArgsMixin):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all tasks related to given asset.
+        Get asset tasks
         ---
+        description: Retrieve all tasks related to a specific asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
+          - in: query
+            name: task_type_id
+            type: string
+            format: uuid
+            description: Filter tasks by task type
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: task_status_id
+            type: string
+            format: uuid
+            description: Filter tasks by task status
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: All tasks related to given asset
+          200:
+            description: List of asset tasks successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Task unique identifier
+                        example: e68e0ie8-gi19-8009-e514-91897426g69
+                      name:
+                        type: string
+                        description: Task name
+                        example: "Modeling Task"
+                      task_type_id:
+                        type: string
+                        format: uuid
+                        description: Task type identifier
+                        example: f79f1jf9-hj20-9110-f625-02908537h70
+                      task_status_id:
+                        type: string
+                        format: uuid
+                        description: Task status identifier
+                        example: g80g2kg0-ik31-0221-g736-13019648i81
+                      entity_id:
+                        type: string
+                        format: uuid
+                        description: Asset identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      assigned_to:
+                        type: string
+                        format: uuid
+                        description: Assigned user identifier
+                        example: h91h3lh1-jl42-1332-h847-24120759j92
+                      created_at:
+                        type: string
+                        format: date-time
+                        description: Creation timestamp
+                        example: "2023-01-01T12:00:00Z"
+                      updated_at:
+                        type: string
+                        format: date-time
+                        description: Last update timestamp
+                        example: "2023-01-01T12:30:00Z"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
+        user_service.check_entity_access(asset["id"])
         return tasks_service.get_tasks_for_asset(
             asset_id, relations=self.get_relations()
         )
@@ -356,23 +806,54 @@ class AssetTaskTypesResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all task types of tasks related to given asset.
+        Get asset task types
         ---
+        description: Retrieve all task types that are used for tasks related to a specific asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: All task types of tasks related to given asset
+          200:
+            description: List of asset task types successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Task type unique identifier
+                        example: f79f1jf9-hj20-9110-f625-02908537h70
+                      name:
+                        type: string
+                        description: Task type name
+                        example: "Modeling"
+                      short_name:
+                        type: string
+                        description: Task type short name
+                        example: "MOD"
+                      color:
+                        type: string
+                        description: Task type color code
+                        example: "#FF5733"
+                      for_entity:
+                        type: string
+                        description: Entity type this task type is for
+                        example: "Asset"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
+        user_service.check_entity_access(asset["id"])
         return tasks_service.get_task_types_for_asset(asset_id)
 
 
@@ -381,50 +862,106 @@ class NewAssetResource(Resource, ArgsMixin):
     @jwt_required()
     def post(self, project_id, asset_type_id):
         """
-        Create new asset with given parameters.
+        Create asset
         ---
+        description: Create a new asset in a specific project with the given asset type and parameters.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: path
             name: asset_type_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-          - in: body
-            name: Asset
-            description: Name, description, data and ID of asset
-            schema:
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset type
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
                 type: object
                 required:
-                - name
-                - description
-                - data
-                - is_shared
-                - source_id
+                  - name
+                  - description
+                  - data
+                  - is_shared
+                  - source_id
                 properties:
-                    name:
-                        type: string
-                    description:
-                        type: string
-                    data:
-                        type: string
-                    is_shared:
-                        type: boolean
-                    source_id:
-                        type: string
-                        format: UUID
-                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                  name:
+                    type: string
+                    description: Asset name
+                    example: "Character Name"
+                  description:
+                    type: string
+                    description: Asset description
+                    example: "Main character"
+                  data:
+                    type: object
+                    description: Asset metadata and custom data
+                    example: [{"difficulty": "easy", "atmsophere": "sunny"}]
+                  is_shared:
+                    type: boolean
+                    description: Whether the asset is shared across projects
+                    example: false
+                  source_id:
+                    type: string
+                    format: uuid
+                    description: Source asset identifier for duplication
+                    example: a24a6ea4-ce75-4665-a070-57453082c25
+                  episode_id:
+                    type: string
+                    format: uuid
+                    description: Episode identifier for episodic assets
+                    example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            201:
-                description: New asset resource created
+          201:
+            description: Asset successfully created
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Created asset unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    name:
+                      type: string
+                      description: Asset name
+                      example: "Character Name"
+                    description:
+                      type: string
+                      description: Asset description
+                      example: "Main character"
+                    project_id:
+                      type: string
+                      format: uuid
+                      description: Project identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
+                    entity_type_id:
+                      type: string
+                      format: uuid
+                      description: Asset type identifier
+                      example: c46c8gc6-eg97-6887-c292-79675204e47
+                    created_at:
+                      type: string
+                      format: date-time
+                      description: Creation timestamp
+                      example: "2023-01-01T12:00:00Z"
+                    updated_at:
+                      type: string
+                      format: date-time
+                      description: Last update timestamp
+                      example: "2023-01-01T12:30:00Z"
         """
         (name, description, data, is_shared, source_id) = self.get_arguments()
 
@@ -475,20 +1012,55 @@ class AssetCastingResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve the casting of a given asset.
+        Get asset casting
         ---
+        description: Retrieve the casting information for a specific asset showing which shots or sequences use this asset
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: Casting of given asset
+          200:
+            description: Asset casting information successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    asset_id:
+                      type: string
+                      format: uuid
+                      description: Asset unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    casting:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                            description: Casting entry unique identifier
+                            example: b35b7fb5-df86-5776-b181-68564193d36
+                          entity_id:
+                            type: string
+                            format: uuid
+                            description: Entity identifier (shot/sequence)
+                            example: d57d9hd7-fh08-7998-d403-80786315f58
+                          entity_name:
+                            type: string
+                            description: Entity name
+                            example: "SH001"
+                          entity_type:
+                            type: string
+                            description: Entity type (shot/sequence)
+                            example: "shot"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -498,22 +1070,77 @@ class AssetCastingResource(Resource):
     @jwt_required()
     def put(self, asset_id):
         """
-        Modify the casting of given asset.
+        Update asset casting
         ---
+        description: Modify the casting relationships for a specific asset by updating which shots or sequences use this asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Casting data to update
+                properties:
+                  casting:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_id:
+                          type: string
+                          format: uuid
+                          description: Entity identifier to cast
+                          example: d57d9hd7-fh08-7998-d403-80786315f58
+                        entity_type:
+                          type: string
+                          description: Entity type (shot/sequence)
+                          example: "shot"
         responses:
-            200:
-                description: Modification of assets linked to given asset
+          200:
+            description: Asset casting successfully updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    asset_id:
+                      type: string
+                      format: uuid
+                      description: Asset unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    casting:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                            description: Casting entry unique identifier
+                            example: b35b7fb5-df86-5776-b181-68564193d36
+                          entity_id:
+                            type: string
+                            format: uuid
+                            description: Entity identifier
+                            example: d57d9hd7-fh08-7998-d403-80786315f58
+                          entity_name:
+                            type: string
+                            description: Entity name
+                            example: "SH001"
         """
         casting = request.json
+        if not isinstance(casting, list):
+            raise WrongParameterException("Request body must be a JSON array.")
         asset = assets_service.get_asset(asset_id)
         user_service.check_manager_project_access(asset["project_id"])
         return breakdown_service.update_casting(asset_id, casting)
@@ -524,20 +1151,60 @@ class AssetCastInResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve the list of shots that cast given asset.
+        Get shots casting asset
         ---
+        description: Retrieve all shots that cast a specific asset in their breakdown.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: List of shots that cast given asset
+          200:
+            description: List of shots casting the asset successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Shot unique identifier
+                        example: d57d9hd7-fh08-7998-d403-80786315f58
+                      name:
+                        type: string
+                        description: Shot name
+                        example: "SH001"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      sequence_id:
+                        type: string
+                        format: uuid
+                        description: Sequence identifier
+                        example: e68e0ie8-gi19-8009-e514-91897426g69
+                      frame_in:
+                        type: integer
+                        description: Frame in
+                        example: 100
+                      frame_out:
+                        type: integer
+                        description: Frame out
+                        example: 200
+                      duration:
+                        type: integer
+                        description: Shot duration in frames
+                        example: 100
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -550,20 +1217,52 @@ class AssetShotAssetInstancesResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all shot asset instances linked to given asset.
+        Get shot asset instances
         ---
+        description: Retrieve all shot asset instances that are linked to a specific asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: All shot asset instances linked to given asset
+          200:
+            description: List of shot asset instances successfully retrieved.
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset instance unique identifier
+                        example: f79f1jf9-hj20-9110-f625-02908537h70
+                      asset_id:
+                        type: string
+                        format: uuid
+                        description: Asset identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      shot_id:
+                        type: string
+                        format: uuid
+                        description: Shot identifier
+                        example: d57d9hd7-fh08-7998-d403-80786315f58
+                      number:
+                        type: string
+                        description: Instance number
+                        example: "001"
+                      description:
+                        type: string
+                        description: Instance description
+                        example: "Main character instance"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -574,20 +1273,52 @@ class AssetSceneAssetInstancesResource(Resource):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all scene asset instances linked to given asset.
+        Get scene asset instances
         ---
+        description: Retrieve all scene asset instances that are linked to a specific asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: All scene asset instances linked to given asset
+          200:
+            description: List of scene asset instances successfully retrieved.
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset instance unique identifier
+                        example: f79f1jf9-hj20-9110-f625-02908537h70
+                      asset_id:
+                        type: string
+                        format: uuid
+                        description: Asset identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      scene_id:
+                        type: string
+                        format: uuid
+                        description: Scene identifier
+                        example: g80g2kg0-ik31-0221-g736-13019648i81
+                      number:
+                        type: string
+                        description: Instance number
+                        example: "001"
+                      description:
+                        type: string
+                        description: Instance description
+                        example: "Main character instance"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -598,20 +1329,52 @@ class AssetAssetInstancesResource(Resource, ArgsMixin):
     @jwt_required()
     def get(self, asset_id):
         """
-        Retrieve all asset instances instantiated inside given asset.
+        Get asset instances
         ---
+        description: Retrieve all asset instances that are instantiated inside a specific asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset
         responses:
-            200:
-                description: All asset instances instantiated inside given asset
+          200:
+            description: List of asset instances successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset instance unique identifier
+                        example: f79f1jf9-hj20-9110-f625-02908537h70
+                      asset_id:
+                        type: string
+                        format: uuid
+                        description: Parent asset identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      target_asset_id:
+                        type: string
+                        format: uuid
+                        description: Target asset identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      number:
+                        type: string
+                        description: Instance number
+                        example: "001"
+                      description:
+                        type: string
+                        description: Instance description
+                        example: "Main character instance"
         """
         asset = assets_service.get_asset(asset_id)
         user_service.check_project_access(asset["project_id"])
@@ -620,20 +1383,73 @@ class AssetAssetInstancesResource(Resource, ArgsMixin):
     @jwt_required()
     def post(self, asset_id):
         """
-        Create an asset instance inside given asset.
+        Create asset instance
         ---
+        description: Create a new asset instance inside a specific asset by instantiating another asset.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: asset_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the parent asset
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - asset_to_instantiate_id
+                properties:
+                  asset_to_instantiate_id:
+                    type: string
+                    format: uuid
+                    description: Unique identifier of the asset to instantiate
+                    example: a24a6ea4-ce75-4665-a070-57453082c25
+                  description:
+                    type: string
+                    description: Description for the asset instance
+                    example: "Asset instance description"
         responses:
-            201:
-                description: Asset instance created inside given asset
+          201:
+            description: Asset instance successfully created
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Created asset instance unique identifier
+                      example: f79f1jf9-hj20-9110-f625-02908537h70
+                    asset_id:
+                      type: string
+                      format: uuid
+                      description: Parent asset identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    target_asset_id:
+                      type: string
+                      format: uuid
+                      description: Target asset identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
+                    number:
+                      type: string
+                      description: Instance number
+                      example: "001"
+                    description:
+                      type: string
+                      description: Instance description
+                      example: "Main character instance"
+                    created_at:
+                      type: string
+                      format: date-time
+                      description: Creation timestamp
+                      example: "2023-01-01T12:00:00Z"
         """
         args = self.get_args(
             [
@@ -677,34 +1493,54 @@ class SetSharedProjectAssetsResource(BaseSetSharedAssetsResource):
     @jwt_required()
     def post(self, project_id):
         """
-        Share or unshare all assets (or a list of assets) for given project.
+        Set project assets shared
         ---
+        description: Share or unshare all assets for a specific project or a list of specific assets.
         tags:
-        - Assets
-        consumes:
-            - multipart/form-data
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-          - in: formData
-            name: asset_ids
-            default: None,
-            type: array
-            items:
-                type: UUID
-            x-example: ["a24a6ea4-ce75-4665-a070-57453082c25"]
-          - in: formData
-            name: is_shared
-            default: true
-            type: boolean
-            x-example: true
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
+        requestBody:
+          required: false
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_shared:
+                    type: boolean
+                    description: Whether to share or unshare the assets
+                    example: true
+                  asset_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+                    description: Specific asset IDs to update.
+                    example: ["a24a6ea4-ce75-4665-a070-57453082c25", "b35b7fb5-df86-5776-b181-68564193d36"]
         responses:
-            201:
-                description: All assets modified.
+          200:
+            description: Assets shared status successfully updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    updated_count:
+                      type: integer
+                      description: Number of assets updated
+                      example: 5
+                    project_id:
+                      type: string
+                      format: uuid
+                      description: Project identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
         """
         args = self.get_args(
             [
@@ -726,33 +1562,59 @@ class SetSharedProjectAssetTypeAssetsResource(BaseSetSharedAssetsResource):
     @jwt_required()
     def post(self, project_id, asset_type_id):
         """
-        Share or unshare all assets for given project and asset type.
+        Set asset type assets shared
         ---
+        description: Share or unshare all assets for a specific project and asset type.
         tags:
-        - Assets
-        consumes:
-            - multipart/form-data
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: path
             name: asset_type_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-          - in: formData
-            name: is_shared
-            default: true
-            type: boolean
-            x-example: true
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the asset type
+        requestBody:
+          required: false
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_shared:
+                    type: boolean
+                    description: Whether to share or unshare the assets
+                    example: true
         responses:
-            201:
-                description: All assets modified.
+          200:
+            description: Asset type assets shared status successfully updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    updated_count:
+                      type: integer
+                      description: Number of assets updated
+                      example: 3
+                    project_id:
+                      type: string
+                      format: uuid
+                      description: Project identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
+                    asset_type_id:
+                      type: string
+                      format: uuid
+                      description: Asset type identifier
+                      example: c46c8gc6-eg97-6887-c292-79675204e47
         """
         user_service.check_manager_project_access(project_id)
         return super().post(project_id=project_id, asset_type_id=asset_type_id)
@@ -763,28 +1625,50 @@ class SetSharedAssetsResource(BaseSetSharedAssetsResource):
     @jwt_required()
     def post(self):
         """
-        Share or unshare a list of assets.
+        Set assets shared
         ---
+        description: Share or unshare a specific list of assets by their IDs.
         tags:
-        - Assets
-        consumes:
-            - multipart/form-data
-        parameters:
-          - in: formData
-            name: asset_ids
-            default: None,
-            type: array
-            items:
-                type: UUID
-            x-example: ["a24a6ea4-ce75-4665-a070-57453082c25"]
-          - in: formData
-            name: is_shared
-            default: true
-            type: boolean
-            x-example: true
+          - Assets
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - asset_ids
+                properties:
+                  asset_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+                    description: List of asset IDs to update
+                    example: ["a24a6ea4-ce75-4665-a070-57453082c25", "b35b7fb5-df86-5776-b181-68564193d36"]
+                  is_shared:
+                    type: boolean
+                    description: Whether to share or unshare the assets
+                    example: true
         responses:
-            201:
-                description: All assets modified.
+          200:
+            description: Assets shared status successfully updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    updated_count:
+                      type: integer
+                      description: Number of assets updated
+                      example: 2
+                    asset_ids:
+                      type: array
+                      items:
+                        type: string
+                        format: uuid
+                      description: List of updated asset IDs
+                      example: ["a24a6ea4-ce75-4665-a070-57453082c25", "b35b7fb5-df86-5776-b181-68564193d36"]
         """
         args = self.get_args(
             [
@@ -810,20 +1694,52 @@ class ProjectAssetsSharedUsedResource(Resource):
     @jwt_required()
     def get(self, project_id):
         """
-        Retrieve all shared assets used in project.
+        Get shared assets used in project
         ---
+        description: Retrieve all shared assets that are used in a specific project.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
         responses:
-            200:
-                description: All shared assets used in project
+          200:
+            description: List of shared assets used in project successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Original project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      is_shared:
+                        type: boolean
+                        description: Whether the asset is shared
+                        example: true
         """
         user_service.check_project_access(project_id)
         return assets_service.get_shared_assets_used_in_project(project_id)
@@ -834,26 +1750,64 @@ class ProjectEpisodeAssetsSharedUsedResource(Resource):
     @jwt_required()
     def get(self, project_id, episode_id):
         """
-        Retrieve all shared assets used in project episode.
+        Get shared assets used in episode
         ---
+        description: Retrieve all shared assets that are used in a specific project episode.
         tags:
-            - Assets
+          - Assets
         parameters:
           - in: path
             name: project_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: path
             name: episode_id
-            required: True
+            required: true
             type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the episode
         responses:
-            200:
-                description: All shared assets used in project episode
+          200:
+            description: List of shared assets used in episode successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Asset unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      name:
+                        type: string
+                        description: Asset name
+                        example: "Character Name"
+                      project_id:
+                        type: string
+                        format: uuid
+                        description: Original project identifier
+                        example: b35b7fb5-df86-5776-b181-68564193d36
+                      entity_type_id:
+                        type: string
+                        format: uuid
+                        description: Asset type identifier
+                        example: c46c8gc6-eg97-6887-c292-79675204e47
+                      is_shared:
+                        type: boolean
+                        description: Whether the asset is shared
+                        example: true
+                      episode_id:
+                        type: string
+                        format: uuid
+                        description: Episode identifier
+                        example: d57d9hd7-fh08-7998-d403-80786315f58
         """
         user_service.check_project_access(project_id)
         return assets_service.get_shared_assets_used_in_project(

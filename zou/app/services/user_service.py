@@ -7,7 +7,7 @@ from zou.app.models.entity import Entity
 from zou.app.models.entity_type import EntityType
 from zou.app.models.notification import Notification
 from zou.app.models.person import Person
-from zou.app.models.project import Project
+from zou.app.models.project import Project, ProjectPersonLink
 from zou.app.models.project_status import ProjectStatus
 from zou.app.models.subscription import Subscription
 from zou.app.models.search_filter import SearchFilter
@@ -24,6 +24,8 @@ from zou.app.services import (
     notifications_service,
     names_service,
     persons_service,
+    playlists_service,
+    plugins_service,
     projects_service,
     shots_service,
     status_automations_service,
@@ -37,7 +39,7 @@ from zou.app.services.exception import (
     WrongParameterException,
     TimerNotFoundException,
 )
-from zou.app.utils import cache, fields, permissions
+from zou.app.utils import cache, fields, permissions, events
 
 
 def clear_filter_cache(user_id=None):
@@ -79,7 +81,8 @@ def build_open_project_filter():
     """
     Query filter for project to retrieve only open projects.
     """
-    return ProjectStatus.name.in_(("Active", "open", "Open"))
+    open_status = projects_service.get_open_status()
+    return Project.project_status_id == open_status["id"]
 
 
 def build_related_projects_filter():
@@ -87,15 +90,8 @@ def build_related_projects_filter():
     Query filter for project to retrieve open projects of which the user
     is part of the team.
     """
-    projects = (
-        Project.query.join(
-            ProjectStatus, Project.project_status_id == ProjectStatus.id
-        )
-        .filter(build_team_filter())
-        .filter(build_open_project_filter())
-        .all()
-    )
-    project_ids = [project.id for project in projects]
+    projects = related_projects()
+    project_ids = [project["id"] for project in projects]
     if len(project_ids) > 0:
         return Project.id.in_(project_ids)
     else:
@@ -105,16 +101,29 @@ def build_related_projects_filter():
 def related_projects():
     """
     Return all projects related to current user: open projects of which the user
-    is part of the team.
+    is part of the team as dicts.
     """
+    projects = related_projects_raw()
+    return Project.serialize_list(projects)
+
+
+def related_projects_raw():
+    """
+    Return all projects related to current user: open projects of which the user
+    is part of the team as models.
+    """
+    current_user = persons_service.get_current_user()
     projects = (
-        Project.query.join(Task)
-        .join(ProjectStatus, Project.project_status_id == ProjectStatus.id)
-        .filter(build_team_filter())
+        Project.query.join(
+            ProjectStatus, Project.project_status_id == ProjectStatus.id
+        )
+        .join(ProjectPersonLink, Project.id == ProjectPersonLink.project_id)
+        .filter(ProjectPersonLink.person_id == current_user["id"])
         .filter(build_open_project_filter())
+        .distinct()
         .all()
     )
-    return Project.serialize_list(projects)
+    return projects
 
 
 def get_todos():
@@ -330,7 +339,11 @@ def get_open_projects(name=None):
         query = query.filter(Project.name == name)
 
     if not permissions.has_admin_permissions():
-        query = query.filter(build_team_filter())
+        current_user = persons_service.get_current_user()
+        query = query.join(
+            ProjectPersonLink, Project.id == ProjectPersonLink.project_id
+        )
+        query = query.filter(ProjectPersonLink.person_id == current_user["id"])
 
     for_client = False
     vendor_departments = None
@@ -355,11 +368,16 @@ def get_open_project_ids():
 
 def get_projects(name=None):
     """
-    Get all projects for which current user has a task assigned.
+    Get all projects for which current user is part of the team.
     """
-    query = Project.query.join(
-        ProjectStatus, Project.project_status_id == ProjectStatus.id
-    ).filter(build_team_filter())
+    current_user = persons_service.get_current_user()
+    query = (
+        Project.query.join(
+            ProjectStatus, Project.project_status_id == ProjectStatus.id
+        )
+        .join(ProjectPersonLink, Project.id == ProjectPersonLink.project_id)
+        .filter(ProjectPersonLink.person_id == current_user["id"])
+    )
 
     if name is not None:
         query = query.filter(Project.name == name)
@@ -521,8 +539,31 @@ def check_task_action_access(task_id):
                     ]
                     in user["departments"]
                 )
-    else:
-        is_allowed = False
+
+    if not is_allowed:
+        raise permissions.PermissionDenied
+    return is_allowed
+
+
+def check_supervisor_project_task_type_access(project_id, task_type_id):
+    """
+    Return true if current user can have access to a task type.
+    """
+    is_allowed = False
+    if permissions.has_admin_permissions() or (
+        permissions.has_manager_permissions()
+        and check_belong_to_project(project_id)
+    ):
+        is_allowed = True
+    elif permissions.has_supervisor_permissions() and check_belong_to_project(
+        project_id
+    ):
+        user = persons_service.get_current_user(relations=True)
+        is_allowed = (
+            user["departments"] == []
+            or tasks_service.get_task_type(task_type_id)["department_id"]
+            in user["departments"]
+        )
 
     if not is_allowed:
         raise permissions.PermissionDenied
@@ -555,7 +596,7 @@ def check_comment_access(comment_id):
             current_user = persons_service.get_current_user()
             project = projects_service.get_project(task["project_id"])
             if project.get("is_clients_isolated", False):
-                if not comment["person_id"] == current_user["id"]:
+                if comment["person_id"] != current_user["id"]:
                     raise permissions.PermissionDenied
             if persons_service.get_person(person_id)["role"] == "client":
                 return True
@@ -597,12 +638,10 @@ def check_time_spent_access(task_id, person_id):
     task = tasks_service.get_task(task_id, relations=True)
     is_allowed = person_id in task["assignees"] and (
         persons_service.get_current_user()["id"] == person_id
+        or permissions.has_admin_permissions()
         or (
-            permissions.has_admin_permissions()
-            or (
-                permissions.has_manager_permissions()
-                and check_belong_to_project(task["project_id"])
-            )
+            permissions.has_manager_permissions()
+            and check_belong_to_project(task["project_id"])
         )
     )
 
@@ -640,12 +679,14 @@ def check_supervisor_project_access(project_id):
     return is_allowed
 
 
-def check_supervisor_task_access(task, new_data={}):
+def check_supervisor_task_access(task, new_data=None):
     """
     Return true if current user is a manager and has a task assigned related
     to the project of this task or is a supervisor and can modify data accorded
     to his departments
     """
+    if new_data is None:
+        new_data = {}
     is_allowed = False
     if permissions.has_admin_permissions() or (
         permissions.has_manager_permissions()
@@ -657,9 +698,13 @@ def check_supervisor_task_access(task, new_data={}):
     ):
         # checks that the supervisor only modifies columns
         # for which he is authorized
-        allowed_columns = set(
-            ["priority", "start_date", "due_date", "estimation", "difficulty"]
-        )
+        allowed_columns = {
+            "priority",
+            "start_date",
+            "due_date",
+            "estimation",
+            "difficulty",
+        }
         if len(set(new_data.keys()) - allowed_columns) == 0:
             user_departments = persons_service.get_current_user(
                 relations=True
@@ -678,44 +723,14 @@ def check_supervisor_task_access(task, new_data={}):
     return is_allowed
 
 
-def check_supervisor_schedule_item_access(schedule_item, new_data={}):
-    """
-    Return true if current user is a manager and has a task assigned related
-    to the project of this task or is a supervisor and can modify data accorded
-    to his departments
-    """
-    is_allowed = False
-    if permissions.has_admin_permissions() or (
-        permissions.has_manager_permissions()
-        and check_belong_to_project(schedule_item["project_id"])
-    ):
-        is_allowed = True
-    elif permissions.has_supervisor_permissions() and check_belong_to_project(
-        schedule_item["project_id"]
-    ):
-        user_departments = persons_service.get_current_user(relations=True)[
-            "departments"
-        ]
-        if (
-            user_departments == []
-            or tasks_service.get_task_type(schedule_item["task_type_id"])[
-                "department_id"
-            ]
-            in user_departments
-        ):
-            is_allowed = True
-
-    if not is_allowed:
-        raise permissions.PermissionDenied
-    return is_allowed
-
-
-def check_metadata_department_access(entity, new_data={}):
+def check_metadata_department_access(entity, new_data=None):
     """
     Return true if current user is a manager and has a task assigned for this
     project or is a supervisor and is allowed to modify data accorded to
     his departments
     """
+    if new_data is None:
+        new_data = {}
     is_allowed = False
     if permissions.has_admin_permissions() or (
         (
@@ -730,7 +745,7 @@ def check_metadata_department_access(entity, new_data={}):
     ):
         # checks that the supervisor only modifies columns
         # for which he is authorized
-        allowed_columns = set(["data"])
+        allowed_columns = {"data"}
         if len(set(new_data.keys()) - allowed_columns) == 0:
             user_departments = persons_service.get_current_user(
                 relations=True
@@ -858,11 +873,13 @@ def check_task_department_access_for_unassign(task_id, person_id=None):
     return is_allowed
 
 
-def check_all_departments_access(project_id, departments=[]):
+def check_all_departments_access(project_id, departments=None):
     """
     Return true if current user is admin or is manager and is in team or is
     supervisor and is in team and have access to all departments.
     """
+    if departments is None:
+        departments = []
     if not isinstance(departments, list):
         departments = [departments]
     is_allowed = False
@@ -1026,7 +1043,6 @@ def create_filter(
         search_filter_group_id=search_filter_group_id,
         department_id=department_id,
     )
-    search_filter.serialize()
     if search_filter.is_shared:
         clear_filter_cache()
     else:
@@ -1085,14 +1101,6 @@ def update_filter(search_filter_id, data):
         ):
             raise WrongParameterException(
                 "A search filter should have the same value for is_shared than its search filter group."
-            )
-
-    department_id = data.get("department_id", None)
-    if department_id is not None:
-        department = tasks_service.get_department(department_id)
-        if department is None:
-            raise WrongParameterException(
-                f"No department found with id: {department_id}"
             )
 
     search_filter.update(data)
@@ -1221,8 +1229,6 @@ def create_filter_group(
         is_shared=is_shared,
         department_id=department_id,
     )
-    search_filter_group.serialize()
-
     if search_filter_group.is_shared:
         clear_filter_group_cache()
     else:
@@ -1338,7 +1344,25 @@ def update_notification(notification_id, read):
     notification = Notification.get_by(
         id=notification_id, person_id=current_user["id"]
     )
+    if notification is None:
+        raise NotificationNotFoundException
     notification.update({"read": read})
+    if read:
+        events.emit(
+            "notification:read",
+            {
+                "person_id": current_user["id"],
+                "notification_id": notification_id,
+            },
+        )
+    else:
+        events.emit(
+            "notification:unread",
+            {
+                "person_id": current_user["id"],
+                "notification_id": notification_id,
+            },
+        )
     return notification.serialize()
 
 
@@ -1373,8 +1397,8 @@ def get_last_notifications(
         Notification.query.filter_by(person_id=current_user["id"])
         .order_by(Notification.created_at.desc())
         .join(Author, Author.id == Notification.author_id)
-        .join(Task, Task.id == Notification.task_id)
-        .join(Project, Project.id == Task.project_id)
+        .outerjoin(Task, Task.id == Notification.task_id)
+        .outerjoin(Project, Project.id == Task.project_id)
         .outerjoin(
             Subscription,
             and_(
@@ -1445,9 +1469,25 @@ def get_last_notifications(
         subscription_id,
         role,
     ) in notifications:
-        (full_entity_name, episode_id, entity_preview_file_id) = (
-            names_service.get_full_entity_name(task_entity_id)
-        )
+        full_entity_name, episode_id, entity_preview_file_id = "", None, None
+        playlist_id = notification.playlist_id
+        playlist_name = ""
+        playlist_for_entity = ""
+        playlist_is_for_all = False
+        if notification.playlist_id is None:
+            (full_entity_name, episode_id, entity_preview_file_id) = (
+                names_service.get_full_entity_name(task_entity_id)
+            )
+        else:
+            playlist = playlists_service.get_playlist(notification.playlist_id)
+            episode_id = playlist.get("episode_id", None)
+            project = projects_service.get_project(playlist["project_id"])
+            project_id = project["id"]
+            project_name = project["name"]
+            playlist_name = playlist["name"]
+            playlist_for_entity = playlist["for_entity"]
+            playlist_is_for_all = playlist["is_for_all"]
+
         preview_file_id = None
         mentions = []
         department_mentions = []
@@ -1511,6 +1551,10 @@ def get_last_notifications(
                     "episode_id": episode_id,
                     "entity_preview_file_id": entity_preview_file_id,
                     "subscription_id": subscription_id,
+                    "playlist_id": playlist_id,
+                    "playlist_name": playlist_name,
+                    "playlist_for_entity": playlist_for_entity,
+                    "playlist_is_for_all": playlist_is_for_all,
                 }
             )
         )
@@ -1536,7 +1580,7 @@ def mark_notifications_as_read():
 
     db.session.execute(update_stmt)
     db.session.commit()
-
+    events.emit("notification:all-read", {"person_id": current_user["id"]})
     return True
 
 
@@ -1637,6 +1681,7 @@ def get_context():
         "search_filters": get_filters(),
         "search_filter_groups": get_filter_groups(),
         "preview_background_files": files_service.get_preview_background_files(),
+        "plugins": plugins_service.get_plugins(),
     }
 
     if permissions.has_admin_permissions():

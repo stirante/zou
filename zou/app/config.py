@@ -15,12 +15,14 @@ APP_SYSTEM_ERROR_SUBJECT_LINE = "%s system error" % APP_NAME
 SECRET_KEY = os.getenv("SECRET_KEY", "mysecretkey")
 
 AUTH_STRATEGY = os.getenv("AUTH_STRATEGY", "auth_local_classic")
+BCRYPT_LOG_ROUNDS = int(os.getenv("BCRYPT_LOG_ROUNDS", 12))
 
 KEY_VALUE_STORE = {
     "host": os.getenv("KV_HOST", "localhost"),
     "port": os.getenv("KV_PORT", "6379"),
     "password": os.getenv("KV_PASSWORD", None),
 }
+CACHE_TYPE = os.getenv("CACHE_TYPE", None)
 AUTH_TOKEN_BLACKLIST_KV_INDEX = 0
 MEMOIZE_DB_INDEX = 1
 KV_EVENTS_DB_INDEX = 2
@@ -52,6 +54,12 @@ SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {
     "pool_size": int(os.getenv("DB_POOL_SIZE", 30)),
     "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", 60)),
+    # Verify connections before using them (prevents using stale connections)
+    "pool_pre_ping": envtobool("DB_POOL_PRE_PING", True),
+    # Recycle connections after this many seconds (prevents long-lived connections)
+    "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", 3600)),
+    # Reset connections when returning to pool (cleans up transaction state)
+    "pool_reset_on_return": os.getenv("DB_POOL_RESET_ON_RETURN", "commit"),
 }
 
 INDEXER = {
@@ -68,6 +76,7 @@ PREVIEW_FOLDER = os.getenv(
     "PREVIEW_FOLDER",
     os.getenv("THUMBNAIL_FOLDER", os.path.join(os.getcwd(), "previews")),
 )
+PREVIEW_SAVE_SOURCE_FILE = envtobool("PREVIEW_SAVE_SOURCE_FILE", False)
 TMP_DIR = os.getenv("TMP_DIR", os.path.join(tempfile.gettempdir(), "zou"))
 
 EVENT_STREAM_HOST = os.getenv("EVENT_STREAM_HOST", "localhost")
@@ -165,6 +174,18 @@ DEFAULT_LOCALE = os.getenv("DEFAULT_LOCALE", "en_US")
 USER_LIMIT = int(os.getenv("USER_LIMIT", "100"))
 MIN_PASSWORD_LENGTH = int(os.getenv("MIN_PASSWORD_LENGTH", 8))
 PROTECTED_ACCOUNTS = env_with_semicolon_to_list("PROTECTED_ACCOUNTS")
+ENFORCE_2FA = envtobool("ENFORCE_2FA", False)
+# Comma-separated list of user emails exempt from mandatory 2FA requirement
+TWO_FA_EXEMPT_USERS_STR = os.getenv("2FA_EXEMPT_USERS", "")
+TWO_FA_EXEMPT_USERS = (
+    [
+        email.strip()
+        for email in TWO_FA_EXEMPT_USERS_STR.split(",")
+        if email.strip()
+    ]
+    if TWO_FA_EXEMPT_USERS_STR
+    else []
+)
 
 TELEMETRY_URL = os.getenv(
     "TELEMETRY_URL",

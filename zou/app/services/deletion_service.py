@@ -3,6 +3,8 @@ from sqlalchemy.exc import IntegrityError
 
 
 from zou.app.models.attachment_file import AttachmentFile
+from zou.app.models.budget import Budget
+from zou.app.models.budget_entry import BudgetEntry
 from zou.app.models.comment import Comment
 from zou.app.models.desktop_login_log import DesktopLoginLog
 from zou.app.models.entity import (
@@ -40,6 +42,7 @@ from zou.app.services.exception import (
     CommentNotFoundException,
     ModelWithRelationsDeletionException,
     PersonInProtectedAccounts,
+    PreviewFileNotFoundException,
 )
 
 
@@ -118,6 +121,10 @@ def remove_task(task_id, force=False):
         for subscription in subscriptions:
             subscription.delete()
 
+        working_files = WorkingFile.query.filter_by(task_id=task_id)
+        for working_file in working_files:
+            working_file.delete()
+
         preview_files = PreviewFile.query.filter_by(task_id=task_id)
         for preview_file in preview_files:
             remove_preview_file(preview_file)
@@ -149,8 +156,41 @@ def remove_task(task_id, force=False):
     return task_serialized
 
 
+def remove_output_files_for_entity(entity_id):
+    """
+    Remove all OutputFile rows that reference the given entity (entity_id).
+    This avoids FK violation when deleting the entity. Clears PreviewFile
+    source_file_id references before deleting each OutputFile.
+    """
+    output_files = OutputFile.query.filter_by(entity_id=entity_id).all()
+    for output_file in output_files:
+        PreviewFile.query.filter_by(source_file_id=output_file.id).update(
+            {"source_file_id": None}
+        )
+        output_file.delete()
+    return output_files
+
+
+def remove_output_files_for_project(project_id):
+    """
+    Remove all OutputFile rows that reference any entity in the project.
+    Called after preview files and tasks are already removed, so no need to
+    clear PreviewFile.source_file_id.
+    """
+    output_files = (
+        OutputFile.query.join(Entity, OutputFile.entity_id == Entity.id)
+        .filter(Entity.project_id == project_id)
+        .all()
+    )
+    for output_file in output_files:
+        output_file.delete()
+    return output_files
+
+
 def remove_preview_file_by_id(preview_file_id, force=False):
     preview_file = PreviewFile.get(preview_file_id)
+    if preview_file is None:
+        raise PreviewFileNotFoundException
     return remove_preview_file(preview_file, force=force)
 
 
@@ -259,7 +299,7 @@ def clear_preview_background_files(preview_background_id, force=False):
         ]:
             try:
                 file_store.remove_picture(image_type, preview_background_id)
-            except BaseException:
+            except Exception:
                 pass
 
 
@@ -285,11 +325,12 @@ def clear_movie_files(preview_file_id):
     Remove all files related to given preview file, supposing the original file
     was a movie.
     """
-    try:
-        file_store.remove_movie("previews", preview_file_id)
-    except BaseException:
-        pass
-    for image_type in ["thumbnails", "thumbnails-square", "previews"]:
+    for movie_type in ["previews", "lowdef", "source"]:
+        try:
+            file_store.remove_movie(movie_type, preview_file_id)
+        except BaseException:
+            pass
+    for image_type in ["thumbnails", "thumbnails-square", "previews", "tiles"]:
         try:
             file_store.remove_picture(image_type, preview_file_id)
         except BaseException:
@@ -303,7 +344,7 @@ def clear_generic_files(preview_file_id):
     """
     try:
         file_store.remove_file("previews", preview_file_id)
-    except BaseException:
+    except Exception:
         pass
 
 
@@ -338,29 +379,36 @@ def remove_tasks_for_project_and_task_type(project_id, task_type_id):
 def remove_project(project_id):
     from zou.app.services import playlists_service
 
+    preview_files = (
+        PreviewFile.query.join(Task)
+        .filter(Task.project_id == project_id)
+        .all()
+    )
+    for preview_file in preview_files:
+        remove_preview_file(preview_file, force=True)
+
     tasks = Task.query.filter_by(project_id=project_id)
     for task in tasks:
         remove_task(task.id, force=True)
 
-    query = EntityLink.query.join(
-        Entity, EntityLink.entity_in_id == Entity.id
-    ).filter(Entity.project_id == project_id)
-    for link in query:
-        link.delete_no_commit()
-    EntityLink.commit()
+    budgets = Budget.get_all_by(project_id=project_id)
+    for budget in budgets:
+        BudgetEntry.delete_all_by(budget_id=budget.id)
+        budget.delete()
 
-    query = EntityVersion.query.join(
-        Entity, EntityVersion.entity_id == Entity.id
-    ).filter(Entity.project_id == project_id)
-    for version in query:
-        version.delete_no_commit()
-    EntityLink.commit()
-
+    EntityLink.query.filter(
+        EntityLink.entity_in_id == Entity.id,
+        Entity.project_id == project_id,
+    ).delete()
+    EntityVersion.query.filter(
+        EntityVersion.entity_id == Entity.id, Entity.project_id == project_id
+    ).delete()
     playlists = Playlist.query.filter_by(project_id=project_id)
     for playlist in playlists:
         playlists_service.remove_playlist(playlist.id)
 
     ApiEvent.delete_all_by(project_id=project_id)
+    remove_output_files_for_project(project_id)
     Entity.delete_all_by(project_id=project_id)
 
     descriptors = MetadataDescriptor.query.filter_by(project_id=project_id)
@@ -372,10 +420,9 @@ def remove_project(project_id):
     ScheduleItem.delete_all_by(project_id=project_id)
     SearchFilterGroup.delete_all_by(project_id=project_id)
     SearchFilter.delete_all_by(project_id=project_id)
-
-    for news in News.query.join(Task).filter_by(project_id=project_id).all():
-        news.delete_no_commit()
-    News.commit()
+    News.query.filter(
+        News.task_id == Task.id, Task.project_id == project_id
+    ).delete()
     project = Project.get(project_id)
     project.delete()
     events.emit("project:delete", {"project_id": project.id})
@@ -500,6 +547,7 @@ def remove_episode(episode_id, force=False):
         EntityLink.delete_all_by(entity_out_id=episode_id)
         EntityConceptLink.delete_all_by(entity_in_id=episode_id)
         EntityConceptLink.delete_all_by(entity_out_id=episode_id)
+        remove_output_files_for_entity(episode_id)
     try:
         episode.delete()
         events.emit(

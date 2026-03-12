@@ -14,7 +14,7 @@ from ldap3.core.exceptions import (
     LDAPInvalidCredentialsResult,
 )
 
-from zou.app.services import persons_service
+from zou.app.services import persons_service, templates_service
 from zou.app.models.person import Person
 from zou.app.services.exception import (
     EmailOTPAlreadyEnabledException,
@@ -34,8 +34,10 @@ from zou.app.services.exception import (
     WrongPasswordException,
     WrongUserException,
 )
+from zou.app import config
 from zou.app.stores import auth_tokens_store
 from zou.app.utils import date_helpers, emails
+from zou.app.utils.email_i18n import get_email_translation
 
 from fido2.webauthn import (
     PublicKeyCredentialUserEntity,
@@ -260,6 +262,14 @@ def person_two_factor_authentication_enabled(person):
     )
 
 
+def is_user_exempt_from_2fa(person, app):
+    """
+    Check if user is exempt from mandatory 2FA requirement.
+    """
+    exempt_users = app.config.get("TWO_FA_EXEMPT_USERS", [])
+    return person.get("email", "") in exempt_users
+
+
 def person_two_factor_authentication_enabled_raw(person):
     return (
         person.totp_enabled or person.email_otp_enabled or person.fido_enabled
@@ -330,14 +340,14 @@ def check_fido(person, authentication_response):
     except KeyError:
         return False
     try:
+        # Get fido_credentials from database since it's not in serialized person
+        fido_credentials = Person.get(person["id"]).fido_credentials
         current_app.extensions["fido_server"].authenticate_complete(
             state,
-            get_fido_attested_credential_data_from_person(
-                person["fido_credentials"],
-            ),
+            get_fido_attested_credential_data_from_person(fido_credentials),
             authentication_response,
         )
-    except BaseException:
+    except Exception:
         return False
     return True
 
@@ -469,6 +479,7 @@ def disable_email_otp(person_id):
 def send_email_otp(person):
     """
     Send an email with OTP and store the OTP for checking after.
+    Email content is translated according to the person's locale.
     """
     count = random.randint(0, 999999999999)
     otp = pyotp.HOTP(person["email_otp_secret"]).at(count)
@@ -476,34 +487,33 @@ def send_email_otp(person):
         "email-otp-count-%s" % person["email"], count, ttl=60 * 5
     )
     organisation = persons_service.get_organisation()
+    locale = person.get("locale") or getattr(config, "DEFAULT_LOCALE", "en_US")
+    if hasattr(locale, "language"):
+        locale = str(locale)
     time_string = format_datetime(
         date_helpers.get_utc_now_datetime(),
         tzinfo=person["timezone"],
         locale=person["locale"],
     )
-    person_IP = request.headers.get("X-Forwarded-For", None)
-    html = f"""<p>Hello {person["first_name"]},</p>
-
-<p>
-Your verification code is : <strong>{otp}</strong>
-</p>
-
-<p>
-This one time password will expire after 5 minutes. After, you will have to request a new one.
-This email was sent at this date : {time_string}.
-The IP of the person who requested this is: {person_IP}.
-</p>
-
-Thank you and see you soon on Kitsu,
-</p>
-<p>
-{organisation["name"]} Team
-</p>
-"""
-    subject = (
-        f"{organisation['name']} - Kitsu : your verification code is {otp}"
+    person_IP = request.headers.get("X-Forwarded-For", None) or ""
+    subject = get_email_translation(
+        locale,
+        "auth_otp_subject",
+        organisation_name=organisation["name"],
     )
-    emails.send_email(subject, html, person["email"])
+    title = get_email_translation(locale, "auth_otp_title")
+    html = get_email_translation(
+        locale,
+        "auth_otp_body",
+        first_name=person["first_name"],
+        otp=otp,
+        time_string=time_string,
+        person_IP=person_IP,
+    )
+    email_html_body = templates_service.generate_html_body(
+        title, html, locale=locale
+    )
+    emails.send_email(subject, email_html_body, person["email"], locale=locale)
     return True
 
 

@@ -27,6 +27,7 @@ from zou.app.services import (
 from zou.app.stores import queue_store
 from zou.utils import movie
 from zou.app.utils import (
+    fields,
     fs,
     events,
     permissions,
@@ -40,8 +41,8 @@ from zou.app.services.exception import (
 )
 
 
-ALLOWED_PICTURE_EXTENSION = ["jpe", "jpeg", "jpg", "png"]
-ALLOWED_MOVIE_EXTENSION = [
+ALLOWED_PICTURE_EXTENSION = {"jpe", "jpeg", "jpg", "png"}
+ALLOWED_MOVIE_EXTENSION = {
     "avi",
     "m4v",
     "mkv",
@@ -49,8 +50,8 @@ ALLOWED_MOVIE_EXTENSION = [
     "mp4",
     "webm",
     "wmv",
-]
-ALLOWED_FILE_EXTENSION = [
+}
+ALLOWED_FILE_EXTENSION = {
     "ae",
     "ai",
     "blend",
@@ -73,6 +74,8 @@ ALLOWED_FILE_EXTENSION = [
     "psd",
     "psb",
     "rar",
+    "rev",
+    "riv",
     "sai",
     "sai2",
     "sbbkp",
@@ -81,8 +84,8 @@ ALLOWED_FILE_EXTENSION = [
     "tvpp",
     "wav",
     "zip",
-]
-ALLOWED_PREVIEW_BACKGROUND_EXTENSION = ["hdr"]
+}
+ALLOWED_PREVIEW_BACKGROUND_EXTENSION = {"hdr"}
 
 
 def send_standard_file(
@@ -134,6 +137,8 @@ def send_picture_file(
         mimetype = "image/png"
     elif extension == "hdr":
         mimetype = "image/vnd.radiance"
+    else:
+        mimetype = "application/octet-stream"
     return send_storage_file(
         file_store.get_local_picture_path,
         file_store.open_picture,
@@ -245,15 +250,24 @@ class BaseNewPreviewFilePicture:
         uploaded_movie_path = movie.save_file(
             tmp_folder, preview_file_id, uploaded_file
         )
+        save_source_file = config.PREVIEW_SAVE_SOURCE_FILE
         if normalize and config.ENABLE_JOB_QUEUE and not no_job:
             queue_store.job_queue.enqueue(
                 preview_files_service.prepare_and_store_movie,
-                args=(preview_file_id, uploaded_movie_path),
+                args=(
+                    preview_file_id,
+                    uploaded_movie_path,
+                    True,
+                    save_source_file,
+                ),
                 job_timeout=int(config.JOB_QUEUE_TIMEOUT),
             )
         else:
             preview_files_service.prepare_and_store_movie(
-                preview_file_id, uploaded_movie_path, normalize=normalize
+                preview_file_id,
+                uploaded_movie_path,
+                normalize=normalize,
+                add_source_to_file_store=save_source_file,
             )
         return preview_file_id
 
@@ -309,15 +323,15 @@ class BaseNewPreviewFilePicture:
         original_file_name = ".".join(file_name_parts)
         preview_file = None
         if extension in ALLOWED_PICTURE_EXTENSION:
-            metadada = self.save_picture_preview(instance_id, uploaded_file)
+            metadata = self.save_picture_preview(instance_id, uploaded_file)
             preview_file = preview_files_service.update_preview_file(
                 instance_id,
                 {
                     "extension": "png",
                     "original_name": original_file_name,
-                    "width": metadada["width"],
-                    "height": metadada["height"],
-                    "file_size": metadada["file_size"],
+                    "width": metadata["width"],
+                    "height": metadata["height"],
+                    "file_size": metadata["file_size"],
                     "status": "ready",
                 },
             )
@@ -334,6 +348,7 @@ class BaseNewPreviewFilePicture:
                 )
                 if abort_on_failed:
                     abort(400, "Normalization failed.")
+                return None
             preview_file = preview_files_service.update_preview_file(
                 instance_id,
                 {"extension": "mp4", "original_name": original_file_name},
@@ -364,41 +379,60 @@ class BaseNewPreviewFilePicture:
 class CreatePreviewFilePictureResource(
     BaseNewPreviewFilePicture, Resource, ArgsMixin
 ):
-    """
-    Main resource to add a preview. It stores the preview file and generates
-    three picture files matching preview when it's possible: a square thumbnail,
-    a rectangle thumbnail and a midsize file.
-    """
 
     @jwt_required()
     def post(self, instance_id):
         """
-        Main resource to add a preview.
+        Create preview file
         ---
+        description: Main resource to add a preview. It stores the preview file
+          and generates three picture files (thumbnails) matching preview when
+          it's possible, a square thumbnail, a rectangle thumbnail and a
+          midsize file.
         tags:
           - Previews
-        description: "It stores the preview file and generates three picture files matching preview when it's possible: a square thumbnail, a rectangle thumbnail and a midsize file."
-        consumes:
-          - multipart/form-data
-          - image/png
-          - application/pdf
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
           - in: formData
             name: file
-            required: True
+            required: true
             type: file
+            description: Preview file to upload
         responses:
-            200:
-                description: Preview added
+          201:
+            description: Preview file added successfully
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Preview file unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    extension:
+                      type: string
+                      description: File extension
+                      example: "png"
+                    file_size:
+                      type: integer
+                      description: File size in bytes
+                      example: 1024000
+          400:
+            description: Wrong file format or normalization failed
         """
-        self.is_exist(instance_id)
         self.is_allowed(instance_id)
+
+        if "file" not in request.files:
+            abort(400, "File not provided.")
 
         return (
             self.process_uploaded_file(
@@ -414,18 +448,12 @@ class CreatePreviewFilePictureResource(
         preview_file = files_service.get_preview_file(preview_file_id)
         if preview_file["original_name"]:
             current_app.logger.info(
-                f"Reupload of an existing preview file ({preview_file_id} not allowed."
+                f"Reupload of an existing preview file ({preview_file_id}) not allowed."
             )
             raise PreviewFileReuploadNotAllowedException
 
         user_service.check_task_action_access(preview_file["task_id"])
         return True
-
-    def is_exist(self, preview_file_id):
-        """
-        Return true if preview file entry matching given id exists in database.
-        """
-        return files_service.get_preview_file(preview_file_id) is not None
 
 
 class BaseBatchComment(BaseNewPreviewFilePicture, ArgsMixin):
@@ -524,75 +552,86 @@ class BaseBatchComment(BaseNewPreviewFilePicture, ArgsMixin):
 
 
 class AddTaskBatchCommentResource(BaseBatchComment, Resource):
-    """
-    Creates new comments for given task. Each comments requires a text, a
-    task_status and a person as arguments.
-    """
 
     @jwt_required()
     def post(self, task_id):
         """
-        Creates new comments for given task. Each comments requires a text, a
-        task_status and a person as arguments.
+        Add task batch comments
         ---
+        description: Creates new comments for given task. Each comment requires
+          a text, a task_status and a person as arguments. Can include preview
+          files and attachments.
         tags:
-        - Comments
-        description: Creates new comments for given task. Each comments requires
-                     a text, a task_status and a person as arguments.
+          - Comments
         parameters:
           - in: path
             name: task_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
-          - in: body
-            name: Comment
-            description: person ID, name, comment, revision and change status of task
+            required: true
             schema:
+              type: string
+              format: uuid
+            description: Task unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+        requestBody:
+          required: true
+          content:
+            multipart/form-data:
+              schema:
                 type: object
                 required:
-                    - comments
+                  - comments
                 properties:
-                    comments:
-                        type: string
+                  comments:
+                    type: string
+                    description: JSON string containing array of comments
+                    example: '[{"text": "Good work", "task_status_id": "uuid"}]'
         responses:
-            201:
-                description: New comments created
+          201:
+            description: New comments created
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
         """
         return self.process_comments(task_id)
 
 
 class AddTasksBatchCommentResource(BaseBatchComment, Resource):
-    """
-    Creates new comments for given tasks. Each comments requires a task_id,
-    text, a task_status and a person as arguments.
-    """
 
     @jwt_required()
     def post(self):
         """
-        Creates new comments for given task. Each comments requires a task_id,
-        text, a task_status and a person as arguments.
+        Add tasks batch comments
         ---
+        description: Creates new comments for given tasks. Each comment requires
+          a task_id, text, a task_status and a person as arguments. Can include
+          preview files and attachments.
         tags:
-        - Comments
-        description: Creates new comments for given task. Each comments requires
-                     a task_id, a text, a task_status and a person as arguments.
-        parameters:
-          - in: body
-            name: Comment
-            description: person ID, name, comment, revision and change status of task
-            schema:
+          - Comments
+        requestBody:
+          required: true
+          content:
+            multipart/form-data:
+              schema:
                 type: object
                 required:
-                    - comments
+                  - comments
                 properties:
-                    comments:
-                        type: string
+                  comments:
+                    type: string
+                    description: JSON string containing array of comments
+                    example: '[{"task_id": "uuid", "text": "Good work", "task_status_id": "uuid"}]'
         responses:
-            201:
-                description: New comments created
+          201:
+            description: New comments created
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
         """
         return self.process_comments()
 
@@ -623,25 +662,28 @@ class PreviewFileMovieResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download a movie preview.
+        Get preview movie
         ---
+        description: Download a movie preview file.
         tags:
           - Previews
-        description: "It stores the preview file and generates three picture files matching preview when it's possible: a square thumbnail, a rectangle thumbnail and a midsize file."
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Movie preview downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: File not found
+          200:
+            description: Movie preview downloaded
+            content:
+              video/mp4:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
@@ -665,24 +707,29 @@ class PreviewFileLowMovieResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download a lowdef movie preview.
+        Get preview lowdef movie
         ---
+        description: Download a low definition movie preview file. Falls back to
+          full quality if lowdef version is not available.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Lowdef movie preview downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: File not found
+          200:
+            description: Low definition movie preview downloaded
+            content:
+              video/mp4:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
@@ -690,7 +737,7 @@ class PreviewFileLowMovieResource(BasePreviewFileResource):
             return send_movie_file(
                 instance_id, lowdef=True, last_modified=self.last_modified
             )
-        except Exception:
+        except FileNotFound:
             try:
                 return send_movie_file(
                     instance_id, last_modified=self.last_modified
@@ -711,24 +758,28 @@ class PreviewFileMovieDownloadResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download a movie preview.
+        Download preview movie
         ---
+        description: Download a movie preview file as attachment.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Movie preview downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: File not found
+          200:
+            description: Movie preview downloaded as attachment
+            content:
+              video/mp4:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
@@ -754,34 +805,42 @@ class PreviewFileResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id, extension):
         """
-        Download a generic file preview.
+        Get preview file
         ---
+        description: Download a generic file preview by extension.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
           - in: path
             name: extension
-            required: True
-            type: string
-            x-example: png, pdf, jpg, jpeg, ...
+            required: true
+            schema:
+              type: string
+            description: File extension
+            example: png
         responses:
-            200:
-                description: Generic file preview downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: Non-movie file not found
+          200:
+            description: Generic file preview downloaded
+            content:
+              application/octet-stream:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
         try:
             extension = extension.lower()
+            if extension not in ALLOWED_PICTURE_EXTENSION | ALLOWED_FILE_EXTENSION:
+                abort(400, "Extension not allowed: %s" % extension)
             if extension == "png":
                 return send_picture_file(
                     "original", instance_id, last_modified=self.last_modified
@@ -815,24 +874,28 @@ class PreviewFileDownloadResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download a generic file preview as attachment.
+        Download preview file
         ---
+        description: Download a generic file preview as attachment.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Generic file preview downloaded as attachment
-            403:
-                description: Instance not allowed
-            404:
-                description: Standard file not found
+          200:
+            description: Generic file preview downloaded as attachment
+            content:
+              application/octet-stream:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
@@ -856,8 +919,7 @@ class PreviewFileDownloadResource(BasePreviewFileResource):
                     last_modified=self.last_modified,
                 )
             if extension == "mp4":
-                return send_picture_file(
-                    "original",
+                return send_movie_file(
                     instance_id,
                     as_attachment=True,
                     last_modified=self.last_modified,
@@ -907,24 +969,28 @@ class AttachmentThumbnailResource(Resource):
     @jwt_required()
     def get(self, attachment_file_id):
         """
-        Download the thumbnail representing given attachment file.
+        Get attachment thumbnail
         ---
+        description: Download the thumbnail representing given attachment file.
         tags:
           - Previews
         parameters:
           - in: path
             name: attachment_file_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Attachment file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Thumbnail downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: Picture file not found
+          200:
+            description: Attachment thumbnail downloaded
+            content:
+              image/png:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(attachment_file_id)
 
@@ -957,24 +1023,28 @@ class BasePreviewPictureResource(BasePreviewFileResource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download a thumbnail.
+        Get preview thumbnail
         ---
+        description: Download a thumbnail for a preview file.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Thumbnail downloaded
-            403:
-                description: Instance not allowed
-            404:
-                description: Picture file not found
+          200:
+            description: Preview thumbnail downloaded
+            content:
+              image/png:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_allowed(instance_id)
 
@@ -1086,35 +1156,45 @@ class BaseThumbnailResource(Resource):
     @jwt_required()
     def post(self, instance_id):
         """
-        Create a thumbnail for given object instance.
+        Create thumbnail
         ---
+        description: Create a thumbnail for given object instance.
         tags:
           - Previews
-        consumes:
-          - multipart/form-data
-          - image/png
-          - application/pdf
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Object instance unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
           - in: formData
             name: file
-            required: True
+            required: true
             type: file
+            description: Image file to use as thumbnail
         responses:
-            200:
-                description: Thumbnail created
-            404:
-                description: Cannot found related object.
+          201:
+            description: Thumbnail created successfully
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    thumbnail_path:
+                      type: string
+                      description: URL path to the thumbnail
+                      example: "/api/thumbnails/persons/uuid"
         """
         self.is_exist(instance_id)
         self.check_allowed_to_post(instance_id)
 
         self.prepare_creation(instance_id)
+
+        if "file" not in request.files:
+            abort(400, "File not provided.")
 
         tmp_folder = config.TMP_DIR
         uploaded_file = request.files["file"]
@@ -1139,24 +1219,28 @@ class BaseThumbnailResource(Resource):
     @jwt_required()
     def get(self, instance_id):
         """
-        Download the thumbnail linked to given object instance.
+        Get thumbnail
         ---
+        description: Download the thumbnail linked to given object instance.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Object instance unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
         responses:
-            200:
-                description: Thumbnail downloaded
-            403:
-                description: Access not allowed
-            404:
-                description: Object instance not found
+          200:
+            description: Thumbnail downloaded
+            content:
+              image/png:
+                schema:
+                  type: string
+                  format: binary
         """
         self.is_exist(instance_id)
         self.check_allowed_to_get(instance_id)
@@ -1240,7 +1324,9 @@ class ProjectThumbnailResource(BaseThumbnailResource):
 
 
 class CreateProjectThumbnailResource(ProjectThumbnailResource):
-    pass
+
+    def check_allowed_to_post(self, instance_id):
+        return user_service.check_manager_project_access(instance_id)
 
 
 class SetMainPreviewResource(Resource, ArgsMixin):
@@ -1252,21 +1338,48 @@ class SetMainPreviewResource(Resource, ArgsMixin):
     @jwt_required()
     def put(self, preview_file_id):
         """
-        Set given preview as main preview of the related entity.
+        Set main preview
         ---
+        description: Set given preview as main preview of the related entity.
+          This preview will be used to illustrate the entity.
         tags:
           - Previews
-        description: This preview will be used to illustrate the entity.
         parameters:
           - in: path
             name: preview_file_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: frame_number
+            required: false
+            schema:
+              type: integer
+            description: Frame number for movie previews
+            example: 120
         responses:
-            200:
-                description: Given preview set as main preview
+          200:
+            description: Preview set as main preview
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Entity unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    preview_file_id:
+                      type: string
+                      format: uuid
+                      description: Preview file unique identifier
+                      example: b35b7fb5-df86-5776-b181-68564193d36
+          400:
+            description: Cannot use frame number on non-movie preview
         """
         args = self.get_args([("frame_number", None, False, int)])
         frame_number = args["frame_number"]
@@ -1297,21 +1410,48 @@ class UpdatePreviewPositionResource(Resource, ArgsMixin):
     @jwt_required()
     def put(self, preview_file_id):
         """
-        Allow to change orders of previews for a single revision.
+        Update preview position
         ---
+        description: Allow to change orders of previews for a single revision.
         tags:
           - Previews
-        description: This preview will be used to illustrate the entity.
         parameters:
           - in: path
             name: preview_file_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+        requestBody:
+          required: false
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  position:
+                    type: integer
+                    description: New position for the preview
+                    example: 2
         responses:
-            200:
-                description: Orders of previews changed for a single revision
+          200:
+            description: Preview position updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Preview file unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    position:
+                      type: integer
+                      description: Preview position
+                      example: 2
         """
         args = self.get_args([{"name": "position", "default": 0, "type": int}])
         preview_file = files_service.get_preview_file(preview_file_id)
@@ -1322,38 +1462,72 @@ class UpdatePreviewPositionResource(Resource, ArgsMixin):
 
 
 class UpdateAnnotationsResource(Resource, ArgsMixin):
-    """
-    Allow to modify the annotations stored at the preview level.
-    Modifications are applied via three fields:
-    * `annotation`s to give all the annotations that need to be added.
-    * `updates` that list annotations that needs to be modified.
-    * `deletions` to list the IDs of annotations that needs to be removed.
-    """
 
     @jwt_required()
     def put(self, preview_file_id):
         """
-        Allow to modify the annotations stored at the preview level.
+        Update preview annotations
         ---
+        description: Allow to modify the annotations stored at the preview level.
+          Modifications are applied via three fields, additions to give all the
+          annotations that need to be added, updates that list annotations that
+          needs to be modified, and deletions to list the IDs of annotations that
+          needs to be removed.
         tags:
           - Previews
-        description: |
-                    Modifications are applied via three fields:
-                    * `annotations` to give all the annotations that need to be added.
-
-                    * `updates` that list annotations that needs to be modified.
-
-                    * `deletions` to list the IDs of annotations that needs to be removed.
         parameters:
           - in: path
             name: preview_file_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  additions:
+                    type: array
+                    description: Annotations to add
+                    items:
+                      type: object
+                    example: [{"type": "drawing", "x": 100, "y": 200}]
+                  updates:
+                    type: array
+                    description: Annotations to update
+                    items:
+                      type: object
+                    example: [{"id": "uuid", "x": 150, "y": 250}]
+                  deletions:
+                    type: array
+                    description: Annotation IDs to remove
+                    items:
+                      type: string
+                      format: uuid
+                    example: ["a24a6ea4-ce75-4665-a070-57453082c25"]
         responses:
-            200:
-                description: Orders of previews changed for a single revision
+          200:
+            description: Preview annotations updated
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Preview file unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    annotations:
+                      type: array
+                      description: Updated annotations
+                      items:
+                        type: object
         """
         preview_file = files_service.get_preview_file(preview_file_id)
         task = tasks_service.get_task(preview_file["task_id"])
@@ -1400,16 +1574,67 @@ class RunningPreviewFiles(Resource, ArgsMixin):
     @jwt_required()
     def get(self):
         """
-        Retrieve all preview files from open productions with states equals to processing or broken.
+        Get running preview files
         ---
+        description: Retrieve all preview files from open productions with
+          states equal to processing or broken.
         tags:
           - Previews
+        parameters:
+          - in: query
+            name: cursor_preview_file_id
+            required: false
+            type: string
+            format: uuid
+            description: ID of the last preview file from previous page for cursor-based pagination
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: limit
+            required: false
+            type: integer
+            description: Maximum number of preview files to return
+            example: 100
         responses:
-            200:
-                description: All preview files from open productions with states equals to processing or broken
+          200:
+            description: All preview files from open productions with processing or broken states
+            content:
+              application/json:
+                schema:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        description: Preview file unique identifier
+                        example: a24a6ea4-ce75-4665-a070-57453082c25
+                      status:
+                        type: string
+                        description: Preview file status
+                        example: "processing"
         """
         permissions.check_admin_permissions()
-        return preview_files_service.get_running_preview_files()
+        args = self.get_args(
+            [
+                ("cursor_preview_file_id", None, False),
+                ("limit", None, False, int),
+            ],
+        )
+        cursor_preview_file_id = args["cursor_preview_file_id"]
+        limit = args["limit"]
+
+        if cursor_preview_file_id is not None and not fields.is_valid_id(
+            cursor_preview_file_id
+        ):
+            raise WrongParameterException(
+                "The cursor_preview_file_id parameter is not a valid id"
+            )
+
+        return preview_files_service.get_running_preview_files(
+            cursor_preview_file_id=cursor_preview_file_id,
+            limit=limit,
+        )
 
 
 class ExtractFrameFromPreview(Resource, ArgsMixin):
@@ -1420,21 +1645,36 @@ class ExtractFrameFromPreview(Resource, ArgsMixin):
     @jwt_required()
     def get(self, preview_file_id):
         """
-        Extract a frame from a preview_file
-         ---
-         tags:
-           - Previews
-         description: Extract a frame from a preview_file
-         parameters:
-           - in: path
-             name: preview_file_id
-             required: True
-             type: string
-             format: UUID
-             x-example: a24a6ea4-ce75-4665-a070-57453082c25
-         responses:
-             200:
-                 description: Extracted frame
+        Extract frame from preview
+        ---
+        description: Extract a frame from a preview file movie. Frame number can
+          be specified as query parameter, defaults to 0.
+        tags:
+          - Previews
+        parameters:
+          - in: path
+            name: preview_file_id
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+          - in: query
+            name: frame_number
+            required: false
+            schema:
+              type: integer
+            description: Frame number to extract
+            example: 120
+        responses:
+          200:
+            description: Extracted frame as PNG image
+            content:
+              image/png:
+                schema:
+                  type: string
+                  format: binary
         """
         args = self.get_args([("frame_number", 0, False, int)])
         preview_file = files_service.get_preview_file(preview_file_id)
@@ -1464,6 +1704,30 @@ class ExtractTileFromPreview(Resource):
 
     @jwt_required()
     def get(self, preview_file_id):
+        """
+        Extract tile from preview
+        ---
+        description: Extract a tile from a preview file movie.
+        tags:
+          - Previews
+        parameters:
+          - in: path
+            name: preview_file_id
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+        responses:
+          200:
+            description: Extracted tile as PNG image
+            content:
+              image/png:
+                schema:
+                  type: string
+                  format: binary
+        """
         preview_file = files_service.get_preview_file(preview_file_id)
         user_service.check_task_access(preview_file["task_id"])
         extracted_tile_path = (
@@ -1491,33 +1755,58 @@ class CreatePreviewBackgroundFileResource(Resource):
     @jwt_required()
     def post(self, instance_id):
         """
-        Main resource to add a preview background file.
+        Create preview background file
         ---
+        description: Main resource to add a preview background file. It stores
+          the preview background file and generates a rectangle thumbnail.
         tags:
-          - Preview background file
-        consumes:
-          - multipart/form-data
-          - image/vnd.radiance
+          - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview background file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
           - in: formData
             name: file
-            required: True
+            required: true
             type: file
+            description: HDR file to upload
         responses:
-            200:
-                description: Preview background file added
+          201:
+            description: Preview background file added successfully
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Preview background file unique identifier
+                      example: a24a6ea4-ce75-4665-a070-57453082c25
+                    extension:
+                      type: string
+                      description: File extension
+                      example: "hdr"
+                    file_size:
+                      type: integer
+                      description: File size in bytes
+                      example: 2048000
+          400:
+            description: Wrong file format or error saving file
         """
         self.check_permissions(instance_id)
 
         preview_background_file = files_service.get_preview_background_file(
             instance_id
         )
+
+        if "file" not in request.files:
+            abort(400, "File not provided.")
 
         uploaded_file = request.files["file"]
 
@@ -1526,7 +1815,7 @@ class CreatePreviewBackgroundFileResource(Resource):
         original_file_name = ".".join(file_name_parts)
 
         if extension in ALLOWED_PREVIEW_BACKGROUND_EXTENSION:
-            metadada = self.save_preview_background_file(
+            metadata = self.save_preview_background_file(
                 instance_id, uploaded_file, extension
             )
             preview_background_file = (
@@ -1535,7 +1824,7 @@ class CreatePreviewBackgroundFileResource(Resource):
                     {
                         "extension": extension,
                         "original_name": original_file_name,
-                        "file_size": metadada["file_size"],
+                        "file_size": metadata["file_size"],
                     },
                 )
             )
@@ -1565,6 +1854,7 @@ class CreatePreviewBackgroundFileResource(Resource):
         Get uploaded preview background file, build thumbnail then save
         everything in the file storage.
         """
+        thumbnail_path = None
         try:
             tmp_folder = config.TMP_DIR
             file_name = f"{instance_id}.{extension}"
@@ -1592,7 +1882,7 @@ class CreatePreviewBackgroundFileResource(Resource):
                 "preview_file_id": instance_id,
                 "file_size": file_size,
             }
-        except:
+        except Exception:
             current_app.logger.error(
                 f"Error while saving preview background file and thumbnail: {instance_id}"
             )
@@ -1607,9 +1897,9 @@ class CreatePreviewBackgroundFileResource(Resource):
             try:
                 if os.path.exists(preview_background_path):
                     os.remove(preview_background_path)
-                if os.path.exists(thumbnail_path):
+                if thumbnail_path and os.path.exists(thumbnail_path):
                     os.remove(thumbnail_path)
-            except:
+            except Exception:
                 pass
 
     def emit_preview_background_file_event(self, preview_background_file):
@@ -1637,28 +1927,35 @@ class PreviewBackgroundFileResource(Resource):
     @jwt_required()
     def get(self, instance_id, extension):
         """
-        Download a preview background file.
+        Get preview background file
         ---
+        description: Download a preview background file.
         tags:
           - Previews
         parameters:
           - in: path
             name: instance_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            description: Preview background file unique identifier
+            example: a24a6ea4-ce75-4665-a070-57453082c25
           - in: path
             name: extension
-            required: True
-            type: string
-            format: extension
-            x-example: hdr
+            required: true
+            schema:
+              type: string
+            description: File extension
+            example: hdr
         responses:
-            200:
-                description: Preview background file downloaded
-            404:
-                description: Preview background file not found
+          200:
+            description: Preview background file downloaded
+            content:
+              image/vnd.radiance:
+                schema:
+                  type: string
+                  format: binary
         """
         preview_background_file = files_service.get_preview_background_file(
             instance_id

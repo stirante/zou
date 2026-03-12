@@ -3,23 +3,22 @@ from sqlalchemy.dialects.postgresql import JSONB
 from zou.app import db
 from zou.app.models.serializer import SerializerMixin
 from zou.app.models.base import BaseMixin
+from zou.app.utils import fields
 
 
-assignees_table = db.Table(
-    "assignations",
-    db.Column(
-        "task",
+class TaskPersonLink(db.Model):
+    __tablename__ = "task_person_link"
+    task_id = db.Column(
         UUIDType(binary=False),
         db.ForeignKey("task.id"),
         primary_key=True,
-    ),
-    db.Column(
-        "person",
+    )
+    person_id = db.Column(
         UUIDType(binary=False),
         db.ForeignKey("person.id"),
         primary_key=True,
-    ),
-)
+        index=True,
+    )
 
 
 class Task(db.Model, BaseMixin, SerializerMixin):
@@ -67,7 +66,9 @@ class Task(db.Model, BaseMixin, SerializerMixin):
     assigner_id = db.Column(
         UUIDType(binary=False), db.ForeignKey("person.id"), index=True
     )
-    assignees = db.relationship("Person", secondary=assignees_table)
+    assignees = db.relationship(
+        "Person", secondary=TaskPersonLink.__table__, lazy="selectin"
+    )
 
     __table_args__ = (
         db.UniqueConstraint(
@@ -86,6 +87,8 @@ class Task(db.Model, BaseMixin, SerializerMixin):
 
         self.assignees = []
         for person_id in person_ids:
+            if person_id == "unassigned" or not fields.is_valid_id(person_id):
+                continue
             person = Person.get(person_id)
             if person is not None:
                 self.assignees.append(person)

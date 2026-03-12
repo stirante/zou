@@ -19,6 +19,7 @@ from zou.app.blueprints.projects.resources import (
     ProductionStatusAutomationRemoveResource,
     ProductionMetadataDescriptorResource,
     ProductionMetadataDescriptorsResource,
+    ProductionMetadataDescriptorsReorderResource,
     ProductionMilestonesResource,
     ProductionScheduleItemsResource,
     ProductionTaskTypeScheduleItemsResource,
@@ -31,6 +32,12 @@ from zou.app.blueprints.projects.resources import (
     ProductionBudgetEntriesResource,
     ProductionBudgetEntryResource,
     ProductionMonthTimeSpentsResource,
+    ProductionScheduleVersionTaskLinksResource,
+    ProductionScheduleVersionSetTaskLinksFromTasksResource,
+    ProductionScheduleVersionSetTaskLinksFromProductionScheduleVersionResource,
+    ProductionScheduleVersionApplyToProductionResource,
+    ProductionTaskTypesTimeSpentsResource,
+    ProductionDayOffsResource,
 )
 
 routes = [
@@ -41,6 +48,11 @@ routes = [
         "/data/projects/<project_id>/task-types",
         ProductionTaskTypesResource,
     ),
+    (
+        "/data/projects/<project_id>/task-types/<task_type_id>/time-spents",
+        ProductionTaskTypesTimeSpentsResource,
+    ),
+    ("/data/projects/<project_id>/day-offs", ProductionDayOffsResource),
     (
         "/data/projects/<project_id>/team/<person_id>",
         ProductionTeamRemoveResource,
@@ -93,6 +105,10 @@ routes = [
         "/data/projects/<project_id>/metadata-descriptors/<descriptor_id>",
         ProductionMetadataDescriptorResource,
     ),
+    (
+        "/data/projects/<project_id>/metadata-descriptors/reorder",
+        ProductionMetadataDescriptorsReorderResource,
+    ),
     ("/data/projects/<project_id>/milestones", ProductionMilestonesResource),
     (
         "/data/projects/<project_id>/schedule-items",
@@ -131,6 +147,22 @@ routes = [
     (
         "/data/projects/<project_id>/budgets/time-spents",
         ProductionMonthTimeSpentsResource,
+    ),
+    (
+        "/data/production-schedule-versions/<production_schedule_version_id>/task-links",
+        ProductionScheduleVersionTaskLinksResource,
+    ),
+    (
+        "/actions/production-schedule-versions/<production_schedule_version_id>/set-task-links-from-production",
+        ProductionScheduleVersionSetTaskLinksFromTasksResource,
+    ),
+    (
+        "/actions/production-schedule-versions/<production_schedule_version_id>/set-task-links-from-production-schedule-version",
+        ProductionScheduleVersionSetTaskLinksFromProductionScheduleVersionResource,
+    ),
+    (
+        "/actions/production-schedule-versions/<production_schedule_version_id>/apply-to-production",
+        ProductionScheduleVersionApplyToProductionResource,
     ),
 ]
 

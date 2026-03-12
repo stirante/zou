@@ -18,6 +18,7 @@ from zou.app.services import (
     entities_service,
     projects_service,
     shots_service,
+    tasks_service,
 )
 
 from flask import current_app
@@ -532,16 +533,6 @@ def get_asset_instances_for_shot(shot_id):
     return result
 
 
-def group_by(models, field):
-    result = {}
-    for asset_instance in models:
-        asset_id = asset_instance.serialize()
-        if asset_id not in result:
-            result[asset_id] = []
-        result[asset_id].append(asset_instance.serialize())
-    return result
-
-
 def get_shot_asset_instances_for_asset(asset_id):
     """
     Return asset instances casted in a shot for given asset.
@@ -794,6 +785,7 @@ def refresh_shot_casting_stats(shot, priority_map=None):
             if _is_asset_ready(asset, task, priority_map):
                 nb_ready += 1
         task.update({"nb_assets_ready": nb_ready})
+        tasks_service.clear_task_cache(str(task.id))
         events.emit(
             "task:update-casting-stats",
             {"task_id": str(task.id), "nb_assets_ready": nb_ready},
@@ -808,8 +800,8 @@ def refresh_all_shot_casting_stats():
     available. It saves the result on the task level.
     """
     for project in projects_service.open_projects():
+        priority_map = _get_task_type_priority_map(project["id"])
         for shot in shots_service.get_shots_for_project(project["id"]):
-            priority_map = _get_task_type_priority_map(project["id"])
             refresh_shot_casting_stats(shot, priority_map)
 
 
@@ -829,10 +821,11 @@ def _get_task_type_priority_map(project_id):
 
 def _is_asset_ready(asset, task, priority_map):
     is_ready = False
-    if asset["is_shared"] and asset["project_id"] != str(task.project_id):
-        is_ready = True
-    elif "ready_for" in asset and asset["ready_for"] is not None:
-        priority_ready = priority_map.get(asset["ready_for"], -1) or -1
-        priority_task = priority_map.get(str(task.task_type_id), 0) or 0
-        is_ready = priority_task <= priority_ready
+    if not asset.get("canceled", False):
+        if asset["is_shared"] and asset["project_id"] != str(task.project_id):
+            is_ready = True
+        elif "ready_for" in asset and asset["ready_for"] is not None:
+            priority_ready = priority_map.get(asset["ready_for"], -1) or -1
+            priority_task = priority_map.get(str(task.task_type_id), 0) or 0
+            is_ready = priority_task <= priority_ready
     return is_ready

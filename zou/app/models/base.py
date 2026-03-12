@@ -1,13 +1,14 @@
 from sqlalchemy_utils import UUIDType
-from sqlalchemy import func
-from sqlalchemy import orm
+from sqlalchemy import func, orm
 from zou.app import db
-from zou.app.utils import fields, date_helpers
+from zou.app.utils import date_helpers, fields
 
 
 class BaseMixin(object):
     id = db.Column(
-        UUIDType(binary=False), primary_key=True, default=fields.gen_uuid
+        UUIDType(binary=False),
+        primary_key=True,
+        default=fields.gen_uuid,
     )
 
     # Audit fields
@@ -77,6 +78,16 @@ class BaseMixin(object):
         Shorthand to retrieve data by using filters.
         """
         return cls.query.filter_by(**kw).all()
+
+    @classmethod
+    def get_or_create(cls, **kw):
+        """
+        Shorthand to retrieve data by using filters.
+        """
+        instance = cls.get_by(**kw)
+        if instance is None:
+            instance = cls.create(**kw)
+        return instance
 
     @classmethod
     def create(cls, **kw):

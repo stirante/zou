@@ -1,3 +1,4 @@
+import copy
 import os
 
 import re
@@ -7,10 +8,11 @@ import ffmpeg
 import shutil
 
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm.exc import ObjectDeletedError
+from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 
 from zou.app import config
 from zou.app.stores import file_store
+from zou.app.stores.redis_lock import with_preview_file_lock
 
 from zou.app.models.entity import Entity
 from zou.app.models.preview_file import PreviewFile
@@ -40,6 +42,8 @@ from zou.app.services.exception import (
     EpisodeNotFoundException,
 )
 from zou.app.utils import fs
+
+REMOTE_NORMALIZE_VERSION = 2
 
 
 def get_preview_file_dimensions(project, entity=None):
@@ -130,19 +134,31 @@ def get_entity_from_preview_file(preview_file_id):
 def update_preview_file(preview_file_id, data, silent=False):
     try:
         preview_file = files_service.get_preview_file_raw(preview_file_id)
-    except BaseException:
-        # Dirty hack because sometimes the preview file retrieval crashes.
+    except Exception:
         try:
             time.sleep(1)
             preview_file = files_service.get_preview_file_raw(preview_file_id)
-        except BaseException:
+        except Exception:
             time.sleep(5)
             preview_file = files_service.get_preview_file_raw(preview_file_id)
     return update_preview_file_raw(preview_file, data, silent=silent)
 
 
 def update_preview_file_raw(preview_file, data, silent=False):
-    preview_file.update(data)
+    try:
+        preview_file.update(data)
+    except StaleDataError:
+        # Preview file was deleted by another process during update
+        preview_file_id = str(preview_file.id)
+        from zou.app import app as current_app
+
+        current_app.logger.warning(
+            f"Preview file {preview_file_id} was deleted during update"
+        )
+        raise PreviewFileNotFoundException(
+            f"Preview file {preview_file_id} was deleted"
+        )
+
     files_service.clear_preview_file_cache(str(preview_file.id))
     if not silent:
         task = Task.get(preview_file.task_id)
@@ -204,15 +220,17 @@ def prepare_and_store_movie(
                 return preview_file
 
         fps = get_preview_file_fps(project, entity)
-        (width, height) = get_preview_file_dimensions(project, entity)
+        width, height = get_preview_file_dimensions(project, entity)
+
+        is_remote = (
+            config.ENABLE_JOB_QUEUE_REMOTE
+            and len(config.JOB_QUEUE_NOMAD_NORMALIZE_JOB) > 0
+        )
 
         if normalize:
             current_app.logger.info("start normalization")
             try:
-                if (
-                    config.ENABLE_JOB_QUEUE_REMOTE
-                    and len(config.JOB_QUEUE_NOMAD_NORMALIZE_JOB) > 0
-                ):
+                if is_remote:
                     result = _run_remote_normalize_movie(
                         current_app, preview_file_id, fps, width, height
                     )
@@ -271,50 +289,75 @@ def prepare_and_store_movie(
             )
             normalized_movie_path = uploaded_movie_path
 
-        # Build thumbnails
+        # Build thumbnails (skipped when remote v2+, done by Nomad job)
         size = movie.get_movie_size(normalized_movie_path)
         width, height = size
-        original_picture_path = movie.generate_thumbnail(normalized_movie_path)
-        thumbnail_utils.turn_into_thumbnail(original_picture_path, size)
-        save_variants(preview_file_id, original_picture_path)
         file_size = os.path.getsize(normalized_movie_path)
         duration = movie.get_movie_duration(normalized_movie_path)
-        current_app.logger.info("thumbnail created %s" % original_picture_path)
 
-        # Build tiles
-        try:
-            tile_path = movie.generate_tile(normalized_movie_path)
-            file_store.add_picture("tiles", preview_file_id, tile_path)
-            os.remove(tile_path)
-            current_app.logger.info("tile created %s" % tile_path)
-        except Exception:
-            current_app.logger.error("Failed to create tile", exc_info=1)
+        remote_handles_thumbnails = is_remote and REMOTE_NORMALIZE_VERSION >= 2
+        if not remote_handles_thumbnails:
+            original_picture_path = movie.generate_thumbnail(
+                normalized_movie_path
+            )
+            thumbnail_utils.turn_into_thumbnail(original_picture_path, size)
+            save_variants(preview_file_id, original_picture_path)
+            current_app.logger.info(
+                "thumbnail created %s" % original_picture_path
+            )
+
+            # Build tiles
+            try:
+                tile_path = movie.generate_tile(normalized_movie_path)
+                file_store.add_picture("tiles", preview_file_id, tile_path)
+                os.remove(tile_path)
+                current_app.logger.info("tile created %s" % tile_path)
+            except Exception:
+                current_app.logger.error("Failed to create tile", exc_info=1)
 
         # Remove files and update status
-        os.remove(uploaded_movie_path)
+        try:
+            os.remove(uploaded_movie_path)
+        except FileNotFoundError:
+            pass
         if normalize:
-            os.remove(normalized_movie_path)
+            try:
+                os.remove(normalized_movie_path)
+            except FileNotFoundError:
+                pass
             if normalized_movie_low_path:
-                os.remove(normalized_movie_low_path)
+                try:
+                    os.remove(normalized_movie_low_path)
+                except FileNotFoundError:
+                    pass
 
-        # Save metadata, save preview file id in the related task and entity
-        preview_file = update_preview_file_raw(
-            preview_file_raw,
-            {
-                "status": "ready",
-                "file_size": file_size,
-                "width": width,
-                "height": height,
-                "duration": duration,
-            },
-        )
-        tasks_service.update_preview_file_info(preview_file)
-        return preview_file
+        # Re-fetch preview file before updating (it may have been deleted during processing)
+        try:
+            preview_file_raw = files_service.get_preview_file_raw(
+                preview_file_id
+            )
+            preview_file = update_preview_file_raw(
+                preview_file_raw,
+                {
+                    "status": "ready",
+                    "file_size": file_size,
+                    "width": width,
+                    "height": height,
+                    "duration": duration,
+                },
+            )
+            tasks_service.update_preview_file_info(preview_file)
+            return preview_file
+        except PreviewFileNotFoundException:
+            current_app.logger.warning(
+                f"Preview file {preview_file_id} was deleted during processing"
+            )
+            return {"id": preview_file_id, "status": "broken"}
 
 
 def _run_remote_normalize_movie(app, preview_file_id, fps, width, height):
     params = {
-        "version": "1",
+        "version": str(REMOTE_NORMALIZE_VERSION),
         "preview_file_id": preview_file_id,
         "width": width,
         "height": height,
@@ -391,33 +434,43 @@ def update_preview_file_annotations(
     person_id,
     project_id,
     preview_file_id,
-    additions=[],
-    updates=[],
-    deletions=[],
+    additions=None,
+    updates=None,
+    deletions=None,
 ):
     """
     Update annotations for given preview file.
+    Uses a Redis lock to prevent race conditions when multiple processes update
+    annotations on the same preview file concurrently.
     """
-    preview_file = files_service.get_preview_file_raw(preview_file_id)
-    previous_annotations = preview_file.annotations or []
-    annotations = _clean_annotations(previous_annotations)
-    annotations = _apply_annotation_additions(previous_annotations, additions)
-    annotations = _apply_annotation_updates(annotations, updates)
-    annotations = _apply_annotation_deletions(annotations, deletions)
-    preview_file.update({"annotations": []})
-    preview_file.update({"annotations": annotations})
-    files_service.clear_preview_file_cache(preview_file_id)
-    preview_file = files_service.get_preview_file(preview_file_id)
-    events.emit(
-        "preview-file:annotation-update",
-        {
-            "preview_file_id": preview_file_id,
-            "person_id": person_id,
-            "updated_at": preview_file["updated_at"],
-        },
-        project_id=project_id,
-    )
-    return preview_file
+    if additions is None:
+        additions = []
+    if updates is None:
+        updates = []
+    if deletions is None:
+        deletions = []
+    with with_preview_file_lock(preview_file_id, timeout=30, wait_timeout=35):
+        preview_file = files_service.get_preview_file_raw(preview_file_id)
+        previous_annotations = copy.deepcopy(preview_file.annotations or [])
+        annotations = _clean_annotations(previous_annotations)
+        annotations = _apply_annotation_additions(
+            previous_annotations, additions
+        )
+        annotations = _apply_annotation_updates(annotations, updates)
+        annotations = _apply_annotation_deletions(annotations, deletions)
+        preview_file.update({"annotations": annotations})
+        files_service.clear_preview_file_cache(preview_file_id)
+        preview_file = files_service.get_preview_file(preview_file_id)
+        events.emit(
+            "preview-file:annotation-update",
+            {
+                "preview_file_id": preview_file_id,
+                "person_id": person_id,
+                "updated_at": preview_file["updated_at"],
+            },
+            project_id=project_id,
+        )
+        return preview_file
 
 
 def _clean_annotations(annotations):
@@ -522,8 +575,12 @@ def _apply_annotation_deletions(annotations, deletions):
         if deletion["time"] in annotation_map:
             annotation = annotation_map[deletion["time"]]
             deleted_object_ids = deletion.get("objects", [])
-            previous_objects = annotation.get("drawing", {}).get("objects", [])
-            annotation.get("drawing", {})["objects"] = [
+            if "drawing" not in annotation or not isinstance(
+                annotation["drawing"], dict
+            ):
+                annotation["drawing"] = {}
+            previous_objects = annotation["drawing"].get("objects", [])
+            annotation["drawing"]["objects"] = [
                 previous_object
                 for previous_object in previous_objects
                 if previous_object.get("id", "") not in deleted_object_ids
@@ -547,12 +604,12 @@ def _clear_empty_annotations(annotations):
     ]
 
 
-def get_running_preview_files():
+def get_running_preview_files(cursor_preview_file_id=None, limit=None):
     """
     Return preview files for all productions with status equals to broken
-    or processing.
+    or processing using cursor-based pagination.
     """
-    entries = (
+    query = (
         PreviewFile.query.join(Task)
         .join(Project)
         .join(ProjectStatus, ProjectStatus.id == Project.project_status_id)
@@ -561,6 +618,21 @@ def get_running_preview_files():
         .add_columns(Task.project_id, Task.task_type_id, Task.entity_id)
         .order_by(PreviewFile.created_at.desc())
     )
+
+    if cursor_preview_file_id is not None:
+        cursor_preview_file = PreviewFile.query.get(cursor_preview_file_id)
+        if cursor_preview_file is None:
+            raise WrongParameterException(
+                f"No preview file found with id: {cursor_preview_file_id}"
+            )
+        query = query.filter(
+            PreviewFile.created_at < cursor_preview_file.created_at
+        )
+
+    if limit is not None:
+        query = query.limit(limit)
+
+    entries = query.all()
 
     results = []
     for preview_file, project_id, task_type_id, entity_id in entries:
@@ -856,7 +928,7 @@ def generate_preview_extra(
             ):
                 try:
                     os.remove(preview_file_path)
-                except:
+                except OSError:
                     pass
 
     print("Extra information generated.")

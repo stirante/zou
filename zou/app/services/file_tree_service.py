@@ -294,7 +294,12 @@ def get_tree_from_project(project):
     return project["file_tree"]
 
 
+_file_tree_cache = {}
+
+
 def get_tree_from_file(tree_name):
+    if tree_name in _file_tree_cache:
+        return _file_tree_cache[tree_name]
     try:
         tree_path = os.path.join(
             os.path.join(app.root_path, "file_trees"), "%s.json" % tree_name
@@ -304,7 +309,9 @@ def get_tree_from_file(tree_name):
         raise WrongFileTreeFileException(
             "File Tree file not found: %s." % tree_path
         )
-    return json.loads(tree_string)
+    tree = json.loads(tree_string)
+    _file_tree_cache[tree_name] = tree
+    return tree
 
 
 def get_folder_path_template(tree, mode, entity):
@@ -589,21 +596,26 @@ def get_folder_from_sequence(entity, field="name"):
         sequence_name = ""
 
     if "Seq" in sequence_name:
-        sequence_number = sequence.name[3:]
+        sequence_number = sequence_name[3:]
         sequence_name = "S%s" % sequence_number.zfill(3)
     return sequence_name
 
 
 def get_folder_from_episode(entity, field="name"):
-    if shots_service.is_shot(entity) or shots_service.is_scene(entity):
-        sequence = shots_service.get_sequence_from_shot(entity)
-    elif shots_service.is_sequence(entity):
-        sequence = entity
+    episode = None
+
+    if shots_service.is_episode(entity):
+        episode = entity
+    else:
+        if shots_service.is_shot(entity) or shots_service.is_scene(entity):
+            sequence = shots_service.get_sequence_from_shot(entity)
+        elif shots_service.is_sequence(entity):
+            sequence = entity
+        episode = shots_service.get_episode_from_sequence(sequence)
 
     try:
-        episode = shots_service.get_episode_from_sequence(sequence)
         episode_name = episode[field]
-    except BaseException:
+    except Exception:
         episode_name = "e001"
 
     return episode_name
@@ -789,7 +801,7 @@ def extract_variable_values_from_path(elements, template_elements):
                 continue
             else:
                 raise WrongPathFormatException(
-                    "{} doesn't match {}".format(elements, template_elements)
+                    f"{elements} doesn't match {template_elements}"
                 )
 
         data_type = token.group("token")
@@ -1131,7 +1143,7 @@ def guess_from_path(project_id, file_path, sep="/"):
                 # Some template_element don't have a corresponding token,
                 # like "05_publish" folder, for example.
                 for token, token_value in tokens.items():
-                    if "<{}>".format(token) in template_element:
+                    if f"<{token}>" in template_element:
                         break
                 else:
                     continue

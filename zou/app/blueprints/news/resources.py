@@ -13,7 +13,8 @@ from zou.app.utils import permissions
 
 
 class NewsMixin(ArgsMixin):
-    def get_news(self, project_ids=[]):
+
+    def get_news(self, project_ids=None):
         (
             only_preview,
             task_type_id,
@@ -91,160 +92,322 @@ class NewsMixin(ArgsMixin):
 
 
 class ProjectNewsResource(Resource, NewsMixin, ArgsMixin):
+
     @jwt_required()
     def get(self, project_id):
         """
-        Retrieve all news related to a given project
+        Get project latest news
         ---
+        description: Get the 50 latest news object (activity feed) for a project
         tags:
           - News
         parameters:
           - in: path
             name: project_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: query
             name: before
-            type: string
-            format: date
-            x-example: "2022-07-12"
+            required: false
+            schema:
+              type: string
+              format: date
+            example: "2022-07-12"
+            description: Filter news before this date
           - in: query
             name: after
-            type: string
-            format: date
-            x-example: "2022-07-12"
+            required: false
+            schema:
+              type: string
+              format: date
+            example: "2022-07-12"
+            description: Filter news after this date
           - in: query
             name: page
-            type: integer
-            x-example: 1
+            required: false
+            schema:
+              type: integer
+              default: 1
+            example: 1
+            description: Page number for pagination
           - in: query
             name: limit
-            type: integer
-            x-example: 50
+            required: false
+            schema:
+              type: integer
+              default: 50
+            example: 50
+            description: Number of news items per page
           - in: query
             name: person_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by specific team member
           - in: query
             name: task_type_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by task type
           - in: query
             name: task_status_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by task status
           - in: query
             name: episode_id
-            type: boolean
-            default: False
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by specific episode
           - in: query
             name: only_preview
-            type: boolean
-            default: False
+            required: false
+            schema:
+              type: boolean
+              default: false
+            example: false
+            description: Show only news related to preview uploads
         responses:
-            200:
-                description: All news related to given project
+          '200':
+            description: All news related to given project
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                            description: Unique news item identifier
+                          title:
+                            type: string
+                            description: News item title
+                          content:
+                            type: string
+                          created_at:
+                            type: string
+                            format: date-time
+                          author_id:
+                            type: string
+                            format: uuid
+                    stats:
+                      type: object
+                      properties:
+                        total:
+                          type: integer
+          '404':
+            description: Project not found
         """
+        projects_service.get_project(project_id)
+        user_service.check_project_access(project_id)
         return self.get_news([project_id])
 
 
 class NewsResource(Resource, NewsMixin, ArgsMixin):
+
     @jwt_required()
     def get(self):
         """
-        Retrieve all news related to a given project
+        Get open projects news
         ---
+        description: Returns the latest news and activity feed from all
+          projects the user has access to.
         tags:
           - News
         parameters:
           - in: query
             name: project_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by specific project
           - in: query
             name: before
-            type: string
-            format: date
-            x-example: "2022-07-12"
+            required: false
+            schema:
+              type: string
+              format: date
+            example: "2022-07-12"
+            description: Filter news before this date
           - in: query
             name: after
-            type: string
-            format: date
-            x-example: "2022-07-12"
+            required: false
+            schema:
+              type: string
+              format: date
+            example: "2022-07-12"
+            description: Filter news after this date
           - in: query
             name: page
-            type: integer
-            x-example: 1
+            required: false
+            schema:
+              type: integer
+              default: 1
+            example: 1
+            description: Page number for pagination
           - in: query
             name: limit
-            type: integer
-            x-example: 50
+            required: false
+            schema:
+              type: integer
+              default: 50
+            example: 50
+            description: Number of news items per page
           - in: query
             name: person_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by specific team member
           - in: query
             name: task_type_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by task type
           - in: query
             name: task_status_id
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by task status
           - in: query
             name: episode_id
-            type: boolean
-            default: False
+            required: false
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Filter news by specific episode
           - in: query
             name: only_preview
-            type: boolean
-            default: False
+            required: false
+            schema:
+              type: boolean
+              default: false
+            example: false
+            description: Show only news related to preview uploads
         responses:
-            200:
-                description: All news from user open projects.
+          '200':
+            description: News feed successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        type: object
+                      description: Array of news items
+                    stats:
+                      type: object
+                      description: News statistics
+                    total:
+                      type: integer
+                      description: Total number of news items
         """
         open_project_ids = []
         if permissions.has_admin_permissions():
             open_project_ids = projects_service.open_project_ids()
         else:
             open_project_ids = user_service.get_open_project_ids()
+
+        project_id = self.get_text_parameter("project_id")
+        if project_id is not None and project_id in open_project_ids:
+            open_project_ids = [project_id]
+
         return self.get_news(project_ids=open_project_ids)
 
 
 class ProjectSingleNewsResource(Resource):
+
     @jwt_required()
     def get(self, project_id, news_id):
         """
-        Retrieve a single given news related to a given project
+        Get news item
         ---
+        description: Retrieves detailed information about a specific news item
+          from a givenproject.
         tags:
           - News
         parameters:
           - in: path
             name: project_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the project
           - in: path
             name: news_id
-            required: True
-            type: string
-            format: UUID
-            x-example: a24a6ea4-ce75-4665-a070-57453082c25
+            required: true
+            schema:
+              type: string
+              format: uuid
+            example: a24a6ea4-ce75-4665-a070-57453082c25
+            description: Unique identifier of the news item
         responses:
-            200:
-                description: Single given news related to given project
+          '200':
+            description: News item successfully retrieved
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: Unique news item identifier
+                    title:
+                      type: string
+                      description: News item title
+                    content:
+                      type: string
+                      description: News item content
+                    created_at:
+                      type: string
+                      format: date-time
+                      description: Creation timestamp
+                    author_id:
+                      type: string
+                      format: uuid
+                      description: Author's user ID
+                    project_id:
+                      type: string
+                      format: uuid
+                      description: Project identifier
+          404:
+            description: News item or project not found
         """
         projects_service.get_project(project_id)
         user_service.check_project_access(project_id)

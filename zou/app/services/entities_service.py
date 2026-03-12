@@ -1,10 +1,11 @@
 from zou.app.services import (
+    assets_service,
     base_service,
     projects_service,
     notifications_service,
-    assets_service,
     shots_service,
     edits_service,
+    tasks_service,
 )
 from zou.app.utils import (
     date_helpers,
@@ -18,8 +19,7 @@ from zou.app.models.entity import Entity, EntityLink, EntityConceptLink
 from zou.app.models.entity_type import EntityType
 from zou.app.models.preview_file import PreviewFile
 from zou.app.models.project import Project
-from zou.app.models.task import assignees_table
-from zou.app.models.task import Task
+from zou.app.models.task import Task, TaskPersonLink
 
 from zou.app import db
 
@@ -239,10 +239,12 @@ def get_entity_links_for_project(
     return results
 
 
-def get_entities_and_tasks(criterions={}):
+def get_entities_and_tasks(criterions=None):
     """
     Get all entities for given criterions with related tasks for each entity.
     """
+    if criterions is None:
+        criterions = {}
     if "episode_id" in criterions and criterions["episode_id"] == "all":
         return []
 
@@ -255,7 +257,7 @@ def get_entities_and_tasks(criterions={}):
 
     query = (
         Entity.query.outerjoin(Task, Task.entity_id == Entity.id)
-        .outerjoin(assignees_table)
+        .outerjoin(TaskPersonLink)
         .add_columns(
             Task.id,
             Task.task_type_id,
@@ -272,7 +274,7 @@ def get_entities_and_tasks(criterions={}):
             Task.last_comment_date,
             Task.last_preview_file_id,
             Task.difficulty,
-            assignees_table.columns.person,
+            TaskPersonLink.person_id,
         )
     )
 
@@ -364,12 +366,26 @@ def get_entities_and_tasks(criterions={}):
     return list(entity_map.values())
 
 
+def get_entity_tasks(entity):
+    """
+    Get all tasks for a given entity.
+    """
+    entity_type = get_entity_type(entity_type_id=entity["entity_type_id"])
+    entity_type_name = entity_type["name"]
+    if assets_service.is_asset_type(entity_type):
+        entity_type_name = "Asset"
+    get_tasks = getattr(
+        tasks_service, "get_tasks_for_" + entity_type_name.lower()
+    )
+    return get_tasks(entity["id"])
+
+
 def remove_entity_link(link_id):
     try:
         link = EntityLink.get_by(id=link_id)
         link.delete()
         return link.serialize()
-    except BaseException:
+    except Exception:
         raise EntityLinkNotFoundException
 
 
@@ -416,7 +432,7 @@ def get_linked_entities_with_tasks(entity_id):
     query = (
         Entity.query.join(Project, Project.id == Entity.project_id)
         .outerjoin(Task, Task.entity_id == Entity.id)
-        .outerjoin(assignees_table)
+        .outerjoin(TaskPersonLink)
         .join(EntityType)
         .add_columns(
             Task.id,
@@ -433,7 +449,7 @@ def get_linked_entities_with_tasks(entity_id):
             Task.last_comment_date,
             Task.nb_assets_ready,
             Task.assigner_id,
-            assignees_table.columns.person,
+            TaskPersonLink.person_id,
             Project.id,
             Project.name,
             EntityType.name,

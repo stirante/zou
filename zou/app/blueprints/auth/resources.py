@@ -1,3 +1,5 @@
+import hmac
+import secrets
 import urllib.parse
 
 from flask import request, jsonify, current_app, redirect, make_response
@@ -25,10 +27,12 @@ from saml2 import entity, client_base
 from zou.app import app, config
 from zou.app.mixin import ArgsMixin
 from zou.app.utils import auth, emails, permissions, date_helpers
+from zou.app.utils.email_i18n import get_email_translation
 from zou.app.services import (
     persons_service,
     auth_service,
     events_service,
+    templates_service,
 )
 
 from zou.app.utils.flask import is_from_browser
@@ -56,21 +60,43 @@ from zou.app.services.exception import (
 )
 
 
+def _build_2fa_registration_response(response_data, user_id):
+    """
+    After a successful 2FA registration, re-emit JWT cookies without
+    the requires_2fa_setup claim so the user gets full access.
+    """
+    additional_claims = {"identity_type": "person"}
+    access_token = create_access_token(
+        identity=user_id,
+        additional_claims=additional_claims,
+    )
+    refresh_token = create_refresh_token(
+        identity=user_id,
+        additional_claims=additional_claims,
+    )
+    response_data["access_token"] = access_token
+    response_data["refresh_token"] = refresh_token
+    response = jsonify(response_data)
+    if is_from_browser(request.user_agent):
+        set_access_cookies(response, access_token)
+        set_refresh_cookies(response, refresh_token)
+
+    current_app.logger.info(
+        "2FA setup completed, JWT refreshed for user %s." % user_id
+    )
+    return response
+
+
 class AuthenticatedResource(Resource):
-    """
-    Returns information if the user is authenticated else it returns a 401
-    response.
-    It can be used by third party tools, especially browser frontend, to know
-    if current user is still logged in.
-    """
 
     @jwt_required()
     def get(self):
         """
-        Returns information if the user is authenticated else it returns a 401
-        response.
+        Check authentication status
         ---
-        description:  It can be used by third party tools, especially browser frontend, to know if current user is still logged in.
+        description: Returns information if the user is authenticated.
+          It can be used by third party tools, especially browser frontend,
+          to know if current user is still logged in.
         tags:
             - Authentication
         responses:
@@ -80,6 +106,9 @@ class AuthenticatedResource(Resource):
             description: Person not found
         """
         person = persons_service.get_current_user(relations=True)
+        person["fido_devices"] = (
+            persons_service.get_current_user_fido_devices()
+        )
         organisation = persons_service.get_organisation(
             sensitive=permissions.has_admin_permissions()
         )
@@ -91,25 +120,19 @@ class AuthenticatedResource(Resource):
 
 
 class LogoutResource(Resource):
-    """
-    Log user out by revoking his auth tokens. Once log out, current user
-    cannot access to API anymore.
-    """
 
     @jwt_required()
     @permissions.require_person
     def get(self):
         """
-        Log user out by revoking his auth tokens.
+        Logout user
         ---
-        description: Once logged out, current user cannot access the API anymore.
+        description: Log user out by revoking auth tokens. Once logged out, current user cannot access the API anymore.
         tags:
             - Authentication
         responses:
           200:
             description: Logout successful
-          500:
-            description: Access token not found
         """
         try:
             auth_service.logout(get_jwt()["jti"])
@@ -130,49 +153,61 @@ class LogoutResource(Resource):
 
 
 class LoginResource(Resource, ArgsMixin):
-    """
-    Log in user by creating and registering auth tokens. Login is based
-    on email and password. If no user match given email and a destkop ID,
-    it looks in matching the desktop ID with the one stored in database. It is
-    useful for clients that run on desktop tools and that don't know user
-    email.
-    """
 
     def post(self):
         """
-        Log in user by creating and registering auth tokens.
+        Login user
         ---
-        description: Login is based on email and password.
-                     If no user match given email and a destkop ID, it looks in matching the desktop ID with the one stored in database.
-                     It is useful for clients that run on desktop tools and that don't know user email.
+        description: Log in user by creating and registering auth tokens.
+          Login is based on email and password. If no user matches given email
+          It fallbacks to a desktop ID. It is useful for desktop tools that
+          don't know user email.
+          It is also possible to login with TOTP, Email OTP, FIDO and recovery
+          code.
         tags:
             - Authentication
-        parameters:
-          - in: formData
-            name: email
-            required: True
-            type: string
-            format: email
-            x-example: admin@example.com
-          - in: formData
-            name: password
-            required: True
-            type: string
-            format: password
-            x-example: mysecretpassword
-          - in: formData
-            name: otp
-            required: False
-            type: string
-            format: password
-            x-example: 123456
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    format: email
+                    example: admin@example.com
+                    description: User email address
+                  password:
+                    type: string
+                    format: password
+                    example: "********"
+                    description: User password
+                    required: true
+                  totp:
+                    type: string
+                    example: 123456
+                    description: TOTP verification code for two-factor authentication
+                    required: false
+                  email_otp:
+                    type: string
+                    example: 123456
+                    description: Email OTP verification code for two-factor authentication
+                  fido_authentication_response:
+                    type: object
+                    description: FIDO authentication response for WebAuth
+                  recovery_code:
+                    type: string
+                    example: ABCD-EFGH-IJKL-MNOP
+                    description: Recovery code for two-factor authentication
+                required:
+                  - email
+                  - password
         responses:
           200:
             description: Login successful
           400:
             description: Login failed
-          500:
-            description: Database not reachable
         """
         (
             email,
@@ -210,17 +245,26 @@ class LoginResource(Resource, ArgsMixin):
                     400,
                 )
 
+            # Check if 2FA enforcement requires restricted access
+            requires_2fa_setup = False
+            if app.config["ENFORCE_2FA"]:
+                if not auth_service.is_user_exempt_from_2fa(user, app):
+                    if not auth_service.person_two_factor_authentication_enabled(
+                        user
+                    ):
+                        requires_2fa_setup = True
+
+            additional_claims = {"identity_type": "person"}
+            if requires_2fa_setup:
+                additional_claims["requires_2fa_setup"] = True
+
             access_token = create_access_token(
                 identity=user["id"],
-                additional_claims={
-                    "identity_type": "person",
-                },
+                additional_claims=additional_claims,
             )
             refresh_token = create_refresh_token(
                 identity=user["id"],
-                additional_claims={
-                    "identity_type": "person",
-                },
+                additional_claims=additional_claims,
             )
             identity_changed.send(
                 current_app._get_current_object(),
@@ -232,18 +276,20 @@ class LoginResource(Resource, ArgsMixin):
             )
 
             organisation = persons_service.get_organisation(
-                sensitive=user["role"] != "admin"
+                sensitive=user["role"] == "admin"
             )
 
-            response = jsonify(
-                {
-                    "user": user,
-                    "organisation": organisation,
-                    "login": True,
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                }
-            )
+            response_data = {
+                "user": user,
+                "organisation": organisation,
+                "login": True,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            }
+            if requires_2fa_setup:
+                response_data["two_factor_authentication_required"] = True
+
+            response = jsonify(response_data)
 
             if is_from_browser(request.user_agent):
                 set_access_cookies(response, access_token)
@@ -253,7 +299,13 @@ class LoginResource(Resource, ArgsMixin):
                 events_service.create_login_log(
                     user["id"], ip_address, "script"
                 )
-            current_app.logger.info(f"User {email} is logged in.")
+            if requires_2fa_setup:
+                current_app.logger.info(
+                    f"User {email} logged in with restricted"
+                    " access - 2FA setup required."
+                )
+            else:
+                current_app.logger.info(f"User {email} is logged in.")
             return response
         except WrongUserException:
             current_app.logger.info(f"User {email} is not registered.")
@@ -334,11 +386,11 @@ class LoginResource(Resource, ArgsMixin):
             )
         except Exception as exception:
             current_app.logger.error(exception, exc_info=1)
-            if hasattr(exception, "message"):
-                message = exception.message
-            else:
-                message = str(exception)
-            return {"error": True, "login": False, "message": message}, 500
+            return {
+                "error": True,
+                "login": False,
+                "message": "A server error occurred. Please contact your administrator.",
+            }, 500
 
     def get_arguments(self):
         args = self.get_args(
@@ -371,9 +423,10 @@ class RefreshTokenResource(Resource):
     @permissions.require_person
     def get(self):
         """
-        Tokens are considered as outdated every two weeks.
+        Refresh access token
         ---
-        description: This route allows to make their lifetime long before they get outdated.
+        description: Tokens are considered outdated every two weeks.
+          This route allows to extend their lifetime before they get outdated.
         tags:
             - Authentication
         responses:
@@ -381,16 +434,25 @@ class RefreshTokenResource(Resource):
             description: Access Token
         """
         user = persons_service.get_current_user()
+        additional_claims = {"identity_type": "person"}
+
+        if app.config["ENFORCE_2FA"]:
+            user_unsafe = persons_service.get_current_user(unsafe=True)
+            if not auth_service.is_user_exempt_from_2fa(user_unsafe, app):
+                if not auth_service.person_two_factor_authentication_enabled(
+                    user_unsafe
+                ):
+                    additional_claims["requires_2fa_setup"] = True
+
         access_token = create_access_token(
             identity=user["id"],
-            additional_claims={
-                "identity_type": "person",
-            },
+            additional_claims=additional_claims,
         )
         if is_from_browser(request.user_agent):
             response = jsonify({"refresh": True})
             set_access_cookies(response, access_token)
             unset_refresh_cookies(response)
+            return response
         else:
             return {"access_token": access_token}
 
@@ -402,35 +464,43 @@ class RegistrationResource(Resource, ArgsMixin):
 
     def post(self):
         """
-        Allow a user to register himself to the service.
+        Register new user
         ---
+        description: Allow a user to register himself to the service.
         tags:
             - Authentication
-        parameters:
-          - in: formData
-            name: email
-            required: True
-            type: string
-            format: email
-            x-example: admin@example.com
-          - in: formData
-            name: password
-            required: True
-            type: string
-            format: password
-          - in: formData
-            name: password_2
-            required: True
-            type: string
-            format: password
-          - in: formData
-            name: first_name
-            required: True
-            type: string
-          - in: formData
-            name: last_name
-            required: True
-            type: string
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    format: email
+                    example: admin@example.com
+                    description: User email address
+                  password:
+                    type: string
+                    format: password
+                    description: User password
+                  password_2:
+                    type: string
+                    format: password
+                    description: Password confirmation
+                  first_name:
+                    type: string
+                    description: User first name
+                  last_name:
+                    type: string
+                    description: User last name
+                required:
+                  - email
+                  - password
+                  - password_2
+                  - first_name
+                  - last_name
         responses:
           201:
             description: Registration successful
@@ -507,49 +577,48 @@ class RegistrationResource(Resource, ArgsMixin):
 
 
 class ChangePasswordResource(Resource, ArgsMixin):
-    """
-    Allow the user to change his password. Prior to modify the password,
-    it requires to give the current password (to make sure the user changing
-    the password is not someone who stealed the session).
-    The new password requires a confirmation to ensure that the user didn't
-    make mistake by typing his new password.
-    """
 
     @jwt_required()
     @permissions.require_person
     def post(self):
         """
-        Allow the user to change his password.
+        Change user password
         ---
-        description: Prior to modifying the password, it requires to give the current password
-                     (to make sure the user changing the password is not someone who stealed the session).
-                     The new password requires a confirmation to ensure that the user didn't
-                     make a mistake by typing his new password.
+        description: Allow the user to change his password. Requires current
+          password for verification and password confirmation to ensure
+          accuracy.
         tags:
             - Authentication
-        parameters:
-          - in: formData
-            name: old_password
-            required: True
-            type: string
-            format: password
-          - in: formData
-            name: password
-            required: True
-            type: string
-            format: password
-          - in: formData
-            name: password_2
-            required: True
-            type: string
-            format: password
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old_password:
+                    type: string
+                    format: password
+                    description: Current password
+                  password:
+                    type: string
+                    format: password
+                    description: New password
+                  password_2:
+                    type: string
+                    format: password
+                    description: New password confirmation
+                required:
+                  - old_password
+                  - password
+                  - password_2
         responses:
           200:
             description: Password changed
           400:
             description: Invalid password or inactive user
         """
-        (old_password, password, password_2) = self.get_arguments()
+        old_password, password, password_2 = self.get_arguments()
 
         try:
             user = persons_service.get_current_user()
@@ -563,28 +632,38 @@ class ChangePasswordResource(Resource, ArgsMixin):
                 "User %s has changed his password" % user["email"]
             )
             organisation = persons_service.get_organisation()
+            locale = user.get("locale") or getattr(
+                config, "DEFAULT_LOCALE", "en_US"
+            )
+            if hasattr(locale, "language"):
+                locale = str(locale)
             time_string = format_datetime(
                 date_helpers.get_utc_now_datetime(),
                 tzinfo=user["timezone"],
                 locale=user["locale"],
             )
-            person_IP = request.headers.get("X-Forwarded-For", None)
-            html = f"""<p>Hello {user["first_name"]},</p>
-
-<p>
-You have successfully changed your password at this date : {time_string}.
-
-Your IP when you have changed your password is : {person_IP}.
-</p>
-
-Thank you and see you soon on Kitsu,
-</p>
-<p>
-{organisation["name"]} Team
-</p>
-"""
-            subject = f"{organisation['name']} - Kitsu: password changed"
-            emails.send_email(subject, html, user["email"])
+            person_IP = request.headers.get("X-Forwarded-For", None) or ""
+            subject = get_email_translation(
+                locale,
+                "auth_password_changed_subject",
+                organisation_name=organisation["name"],
+            )
+            title = get_email_translation(
+                locale, "auth_password_changed_title"
+            )
+            html = get_email_translation(
+                locale,
+                "auth_password_changed_body",
+                first_name=user["first_name"],
+                time_string=time_string,
+                person_IP=person_IP,
+            )
+            email_html_body = templates_service.generate_html_body(
+                title, html, locale=locale
+            )
+            emails.send_email(
+                subject, email_html_body, user["email"], locale=locale
+            )
             return {"success": True}
 
         except auth.PasswordsNoMatchException:
@@ -627,42 +706,45 @@ Thank you and see you soon on Kitsu,
 
 
 class ResetPasswordResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to change his password when he forgets it.
-    It uses a classic scheme: a token is sent by email to the user. Then
-    he can change his password.
-    """
 
     def put(self):
         """
-        Resource to allow a user to change his password when he forgets it.
+        Reset password with token
         ---
-        description: "It uses a classic scheme: a token is sent by email to the user.
-                     Then he can change his password."
+        description: Allow a user to change his password when he forgets it.
+          It uses a token sent by email to the user to verify it is the user
+          who requested the password reset.
         tags:
             - Authentication
-        parameters:
-          - in: formData
-            name: email
-            required: True
-            type: string
-            format: email
-            x-example: admin@example.com
-          - in: formData
-            name: token
-            required: True
-            type: string
-            format: JWT token
-          - in: formData
-            name: password
-            required: True
-            type: string
-            format: password
-          - in: formData
-            name: password2
-            required: True
-            type: string
-            format: password
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    format: email
+                    example: admin@example.com
+                    description: User email address
+                  token:
+                    type: string
+                    format: JWT token
+                    description: Password reset token
+                  password:
+                    type: string
+                    format: password
+                    description: New password
+                  password2:
+                    type: string
+                    format: password
+                    description: New password confirmation
+                required:
+                  - email
+                  - token
+                  - password
+                  - password2
         responses:
           200:
             description: Password reset
@@ -684,7 +766,9 @@ class ResetPasswordResource(Resource, ArgsMixin):
             token_from_store = auth_tokens_store.get(
                 "reset-token-%s" % args["email"]
             )
-            if token_from_store == args["token"]:
+            if token_from_store and hmac.compare_digest(
+                token_from_store, args["token"]
+            ):
                 auth.validate_password(args["password"], args["password2"])
                 password = auth.encrypt_password(args["password"])
                 persons_service.update_password(args["email"], password)
@@ -714,19 +798,26 @@ class ResetPasswordResource(Resource, ArgsMixin):
 
     def post(self):
         """
-        Resource to allow a user to change his password when he forgets it.
+        Request password reset
         ---
-        description: "It uses a classic scheme: a token is sent by email to the user.
-                     Then he can change his password."
+        description: Send a password reset token by email to the user.
+          It uses a classic scheme where a token is sent by email.
         tags:
             - Authentication
-        parameters:
-          - in: formData
-            name: email
-            required: True
-            type: string
-            format: email
-            x-example: admin@example.com
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email:
+                    type: string
+                    format: email
+                    example: admin@example.com
+                    description: User email address
+                required:
+                  - email
         responses:
           200:
             description: Reset token sent
@@ -759,58 +850,58 @@ class ResetPasswordResource(Resource, ArgsMixin):
             config.DOMAIN_NAME,
             query,
         )
+        locale = user.get("locale") or getattr(
+            config, "DEFAULT_LOCALE", "en_US"
+        )
+        if hasattr(locale, "language"):
+            locale = str(locale)
         time_string = format_datetime(
             date_helpers.get_utc_now_datetime(),
             tzinfo=user["timezone"],
             locale=user["locale"],
         )
-        person_IP = request.headers.get("X-Forwarded-For", None)
+        person_IP = request.headers.get("X-Forwarded-For", None) or ""
         organisation = persons_service.get_organisation()
-        html = f"""<p>Hello {user["first_name"]},</p>
-
-<p>
-You have requested for a password reset. You can follow this link to change your
-password: <a href="{reset_url}">{reset_url}</a>
-</p>
-
-<p>
-This link will expire after 2 hours. After, you have to do a new request to reset your password.
-This email was sent at this date: {time_string}.
-The IP of the person who requested this is: {person_IP}.
-</p>
-
-Thank you and see you soon on Kitsu,
-</p>
-<p>
-{organisation["name"]} Team
-</p>
-"""
-        subject = f"{organisation['name']} - Kitsu: password recovery"
-        emails.send_email(subject, html, args["email"])
+        subject = get_email_translation(
+            locale,
+            "auth_password_recovery_subject",
+            organisation_name=organisation["name"],
+        )
+        title = get_email_translation(locale, "auth_password_recovery_title")
+        html = get_email_translation(
+            locale,
+            "auth_password_recovery_body",
+            first_name=user["first_name"],
+            reset_url=reset_url,
+            time_string=time_string,
+            person_IP=person_IP,
+        )
+        email_html_body = templates_service.generate_html_body(
+            title, html, locale=locale
+        )
+        emails.send_email(
+            subject, email_html_body, args["email"], locale=locale
+        )
         return {"success": "Reset token sent"}
 
 
 class TOTPResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to enable/disable TOTP.
-    """
 
     @jwt_required()
     @permissions.require_person
     def put(self):
         """
-        Resource to allow a user to pre-enable TOTP.
+        Pre-enable TOTP
         ---
-        description: ""
+        description: Prepare TOTP (Time-based One-Time Password) for enabling.
+          It returns provisioning URI and secret for authenticator app setup.
         tags:
             - Authentication
         responses:
           200:
-            description: TOTP enabled
+            description: TOTP pre-enabled
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: TOTP already enabled
         """
         try:
             totp_provisionning_uri, totp_secret = auth_service.pre_enable_totp(
@@ -830,26 +921,41 @@ class TOTPResource(Resource, ArgsMixin):
     @permissions.require_person
     def post(self):
         """
-        Resource to allow a user to enable TOTP.
+        Enable TOTP
         ---
-        description: ""
+        description: Enable TOTP (Time-based One-Time Password) authentication.
+          It requires verification code from authenticator app.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totp:
+                    type: string
+                    description: TOTP verification code from authenticator app
+                required:
+                  - totp
         responses:
           200:
             description: TOTP enabled
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: TOTP already enabled or verification failed
         """
         args = self.get_args([("totp", "", True)])
 
         try:
+            current_user = persons_service.get_current_user()
             otp_recovery_codes = auth_service.enable_totp(
-                persons_service.get_current_user()["id"], args["totp"]
+                current_user["id"], args["totp"]
             )
-            return {"otp_recovery_codes": otp_recovery_codes}
+            return _build_2fa_registration_response(
+                {"otp_recovery_codes": otp_recovery_codes},
+                current_user["id"],
+            )
         except TOTPAlreadyEnabledException:
             return (
                 {"error": True, "message": "TOTP already enabled."},
@@ -869,16 +975,36 @@ class TOTPResource(Resource, ArgsMixin):
     @permissions.require_person
     def delete(self):
         """
-        Resource to allow a user to disable TOTP.
+        Disable TOTP
         ---
-        description: ""
+        description: Disable TOTP (Time-based One-Time Password) authentication.
+          It requires two-factor authentication verification.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totp:
+                    type: string
+                    description: TOTP verification code
+                  email_otp:
+                    type: string
+                    description: Email OTP verification code
+                  fido_authentication_response:
+                    type: object
+                    description: FIDO authentication response
+                  recovery_code:
+                    type: string
+                    description: Recovery code for two-factor authentication
         responses:
           200:
             description: TOTP disabled
           400:
-            description: TOTP not enabled
+            description: TOTP not enabled or verification failed
         """
         args = self.get_args(
             [
@@ -922,25 +1048,27 @@ class TOTPResource(Resource, ArgsMixin):
 
 
 class EmailOTPResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to enable/disable OTP by email or to send an OTP
-    by email.
-    """
 
     def get(self):
         """
-        Resource to send an OTP by email to user.
+        Send email OTP
         ---
-        description: ""
+        description: Send a one-time password by email to the user for
+          authentication.
         tags:
             - Authentication
+        parameters:
+          - in: query
+            name: email
+            required: True
+            type: string
+            format: email
+            description: User email address
         responses:
           200:
             description: OTP by email sent
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: OTP by email not enabled
         """
         args = self.get_args(
             [
@@ -975,18 +1103,17 @@ class EmailOTPResource(Resource, ArgsMixin):
     @permissions.require_person
     def put(self):
         """
-        Resource to allow a user to pre-enable OTP by email.
+        Pre-enable email OTP
         ---
-        description: ""
+        description: Prepare email OTP (One-Time Password) for enabling.
+          It sets up email-based two-factor authentication.
         tags:
             - Authentication
         responses:
           200:
-            description: OTP by email enabled
+            description: Email OTP pre-enabled
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: Email OTP already enabled
         """
         try:
             auth_service.pre_enable_email_otp(
@@ -1003,27 +1130,42 @@ class EmailOTPResource(Resource, ArgsMixin):
     @permissions.require_person
     def post(self):
         """
-        Resource to allow a user to enable OTP by email.
+        Enable email OTP
         ---
-        description: ""
+        description: Enable email OTP (One-Time Password) authentication.
+          It requires verification code sent to email.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email_otp:
+                    type: string
+                    description: Email OTP verification code
+                required:
+                  - email_otp
         responses:
           200:
-            description: OTP by email enabled
+            description: Email OTP enabled
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: Email OTP already enabled or verification failed
         """
         args = self.get_args([("email_otp", "", True)])
 
         try:
+            current_user = persons_service.get_current_user()
             otp_recovery_codes = auth_service.enable_email_otp(
-                persons_service.get_current_user()["id"],
+                current_user["id"],
                 args["email_otp"],
             )
-            return {"otp_recovery_codes": otp_recovery_codes}
+            return _build_2fa_registration_response(
+                {"otp_recovery_codes": otp_recovery_codes},
+                current_user["id"],
+            )
         except EmailOTPAlreadyEnabledException:
             return (
                 {"error": True, "message": "OTP by email already enabled."},
@@ -1043,19 +1185,36 @@ class EmailOTPResource(Resource, ArgsMixin):
     @permissions.require_person
     def delete(self):
         """
-        Resource to allow a user to disable OTP by email.
+        Disable email OTP
         ---
-        description: ""
+        description: Disable email OTP (One-Time Password) authentication.
+          It requires two-factor authentication verification.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totp:
+                    type: string
+                    description: TOTP verification code
+                  email_otp:
+                    type: string
+                    description: Email OTP verification code
+                  fido_authentication_response:
+                    type: object
+                    description: FIDO authentication response
+                  recovery_code:
+                    type: string
+                    description: Recovery code for two-factor authentication
         responses:
           200:
-            description: OTP by email disabled.
+            description: Email OTP disabled
           400:
-            description: Invalid password.
-                         Wrong or expired token.
-                         Inactive user.
-                         Wrong 2FA.
+            description: Email OTP not enabled or verification failed
         """
         args = self.get_args(
             [
@@ -1106,16 +1265,24 @@ class FIDOResource(Resource, ArgsMixin):
 
     def get(self):
         """
-        Resource to get a challenge for a FIDO device.
+        Get FIDO challenge
         ---
-        description: ""
+        description: Get a challenge for FIDO device authentication.
+          It is used for WebAuthn authentication flow.
         tags:
             - Authentication
+        parameters:
+          - in: query
+            name: email
+            required: True
+            type: string
+            format: email
+            description: User email address
         responses:
           200:
-            description: Challenge for FIDO device.
+            description: FIDO challenge generated
           400:
-            description: Wrong parameter.
+            description: FIDO not enabled
         """
         args = self.get_args(
             [
@@ -1149,18 +1316,17 @@ class FIDOResource(Resource, ArgsMixin):
     @permissions.require_person
     def put(self):
         """
-        Resource to allow a user to pre-register a FIDO device.
+        Pre-register FIDO device
         ---
-        description: ""
+        description: Prepare FIDO device for registration.
+          It returns registration options for WebAuthn.
         tags:
             - Authentication
         responses:
           200:
-            description: FIDO device pre-registered.
+            description: FIDO device pre-registered data
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: Invalid request
         """
         return auth_service.pre_register_fido(
             persons_service.get_current_user()["id"]
@@ -1170,18 +1336,33 @@ class FIDOResource(Resource, ArgsMixin):
     @jwt_required()
     def post(self):
         """
-        Resource to allow a user to register a FIDO device.
+        Register FIDO device
         ---
-        description: ""
+        description: Register a FIDO device for WebAuthn authentication.
+          It requires registration response from the device.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  registration_response:
+                    type: object
+                    description: FIDO device registration response
+                  device_name:
+                    type: string
+                    description: Name for the FIDO device
+                required:
+                  - registration_response
+                  - device_name
         responses:
           200:
-            description: FIDO device registered.
+            description: FIDO device registered
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: Registration failed or no preregistration
         """
         try:
             args = self.get_args(
@@ -1191,12 +1372,16 @@ class FIDOResource(Resource, ArgsMixin):
                 ]
             )
 
+            current_user = persons_service.get_current_user()
             otp_recovery_codes = auth_service.register_fido(
-                persons_service.get_current_user()["id"],
+                current_user["id"],
                 args["registration_response"],
                 args["device_name"],
             )
-            return {"otp_recovery_codes": otp_recovery_codes}
+            return _build_2fa_registration_response(
+                {"otp_recovery_codes": otp_recovery_codes},
+                current_user["id"],
+            )
         except FIDONoPreregistrationException:
             return (
                 {"error": True, "message": "No preregistration before."},
@@ -1215,35 +1400,43 @@ class FIDOResource(Resource, ArgsMixin):
     @permissions.require_person
     def delete(self):
         """
-        Resource to allow a user to unregister a FIDO device.
+        Unregister FIDO device
         ---
-        description: ""
+        description: Unregister a FIDO device from WebAuthn authentication.
+          The user must be authenticated.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_name:
+                    type: string
+                    description: Name of the FIDO device to unregister
+                required:
+                  - device_name
         responses:
           200:
-            description: FIDO device unregistered.
+            description: FIDO device unregistered
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
-                         Wrong 2FA
+            description: FIDO not enabled
         """
         args = self.get_args(
             [
+                ("device_name", None, True),
                 ("totp", None, False),
                 ("email_otp", None, False),
                 ("fido_authentication_response", {}, False, dict),
                 ("recovery_code", None, False),
-                ("device_name", None, True),
             ]
         )
 
         try:
             person = persons_service.get_current_user(unsafe=True)
-            if not auth_service.person_two_factor_authentication_enabled(
-                person
-            ):
+            if not person["fido_enabled"]:
                 raise FIDONotEnabledException
             if not auth_service.check_two_factor_authentication(
                 person,
@@ -1255,43 +1448,54 @@ class FIDOResource(Resource, ArgsMixin):
                 raise WrongOTPException
             auth_service.unregister_fido(person["id"], args["device_name"])
             return {"success": True}
+        except (WrongOTPException, MissingOTPException):
+            return (
+                {"error": True, "message": "Wrong OTP."},
+                400,
+            )
         except FIDONotEnabledException:
             return (
                 {"error": True, "message": "FIDO not enabled."},
                 400,
             )
-        except (WrongOTPException, MissingOTPException):
-            return (
-                {
-                    "error": True,
-                    "message": "OTP verification failed.",
-                    "wrong_OTP": True,
-                },
-                400,
-            )
 
 
 class RecoveryCodesResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to generate new recovery codes.
-    """
 
     @jwt_required()
     @permissions.require_person
     def put(self):
         """
-        Resource to allow a user to generate new recovery codes.
+        Generate recovery codes
         ---
-        description: ""
+        description: Generate new recovery codes for two-factor authentication.
+          It requires two-factor authentication verification.
         tags:
             - Authentication
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totp:
+                    type: string
+                    description: TOTP verification code
+                  email_otp:
+                    type: string
+                    description: Email OTP verification code
+                  fido_authentication_response:
+                    type: object
+                    description: FIDO authentication response
+                  recovery_code:
+                    type: string
+                    description: Recovery code for two-factor authentication
         responses:
           200:
-            description: new recovery codes.
+            description: New recovery codes generated
           400:
-            description: Invalid password
-                         Wrong or expired token
-                         Inactive user
+            description: No two-factor authentication enabled or verification failed
         """
         args = self.get_args(
             [
@@ -1340,22 +1544,20 @@ class RecoveryCodesResource(Resource, ArgsMixin):
 
 
 class SAMLSSOResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to login with SAML SSO.
-    """
-
     def post(self):
         """
-        Resource to allow a user to login with SAML SSO.
+        SAML SSO login
         ---
-        description: ""
+        description: Handle SAML SSO login response. Processes authentication
+          response from SAML identity provider and creates a new user if they
+          don't exist.
         tags:
             - Authentication
         responses:
           302:
-            description: Login successful, redirect to the home page.
+            description: Login successful, redirect to home page
           400:
-            description: Wrong parameter
+            description: SAML not enabled or wrong parameter
         """
         if not config.SAML_ENABLED:
             return {"error": "SAML is not enabled."}, 400
@@ -1378,10 +1580,8 @@ class SAMLSSOResource(Resource, ArgsMixin):
                 "first_name",
                 "last_name",
                 "phone",
-                "role",
                 "departments",
                 "studio_id",
-                "active",
             ]
         }
         try:
@@ -1393,8 +1593,9 @@ class SAMLSSOResource(Resource, ArgsMixin):
                     )
                     break
         except PersonNotFoundException:
+            random_password = auth.encrypt_password(secrets.token_urlsafe(64))
             user = persons_service.create_person(
-                email, "default".encode("utf-8"), **person_info
+                email, random_password, **person_info
             )
 
         response = make_response(
@@ -1431,22 +1632,20 @@ class SAMLSSOResource(Resource, ArgsMixin):
 
 
 class SAMLLoginResource(Resource, ArgsMixin):
-    """
-    Resource to allow a user to login with SAML SSO.
-    """
 
     def get(self):
         """
-        Resource to allow a user to login with SAML SSO.
+        SAML SSO login redirect
         ---
-        description: ""
+        description: Initiate SAML SSO login by redirecting to SAML identity
+          provider.
         tags:
             - Authentication
         responses:
           302:
-            description: Redirect to the SAML IDP.
+            description: Redirect to SAML identity provider
           400:
-            description: Wrong parameter.
+            description: SAML not enabled or wrong parameter
         """
         if not config.SAML_ENABLED:
             return {"error": "SAML is not enabled."}, 400

@@ -16,9 +16,18 @@ def path(self, filename):
     folder_two = file_name[:3]
     folder_three = file_name[3:6]
 
-    return os.path.join(
-        self.root, folder_one, folder_two, folder_three, file_name
+    # Ensure root is absolute to avoid issues with relative paths
+    root = (
+        os.path.abspath(self.root)
+        if not os.path.isabs(self.root)
+        else self.root
     )
+
+    file_path = os.path.join(
+        root, folder_one, folder_two, folder_three, file_name
+    )
+    # Normalize path to handle any remaining relative components
+    return os.path.normpath(file_path)
 
 
 LocalBackend.path = path
@@ -36,8 +45,13 @@ def configure_storages(app):
 def clear_bucket(bucket):
     for filename in bucket.list_files():
         if isinstance(bucket.backend, LocalBackend):
-            folder_one, _, _, file_name = filename.split("/")
-            bucket.delete(f"{folder_one}-{file_name}")
+            parts = filename.split("/")
+            if len(parts) >= 4:
+                folder_one = parts[0]
+                file_name = parts[-1]
+                bucket.delete(f"{folder_one}-{file_name}")
+            else:
+                bucket.delete(filename)
         else:
             bucket.delete(filename)
 
@@ -47,11 +61,23 @@ def make_key(prefix, id):
 
 
 def make_read_generator(bucket, key):
+    """
+    Create a generator that yields chunks from the storage bucket.
+    This function ensures proper cleanup of the underlying stream to avoid
+    reentrant call errors when the stream is accessed concurrently.
+    """
     read_stream = bucket.read_chunks(key)
 
     def read_generator(read_stream):
-        for chunk in read_stream:
-            yield chunk
+        try:
+            for chunk in read_stream:
+                yield chunk
+        finally:
+            if hasattr(read_stream, "close"):
+                try:
+                    read_stream.close()
+                except Exception:
+                    pass
 
     return read_generator(read_stream)
 

@@ -591,6 +591,7 @@ class UserContextRoutesTestCase(ApiDBTestCase):
         artist = persons_service.get_person_raw(self.user_cg_artist["id"])
         artist.departments.append(self.department)
         artist.save()
+        persons_service.clear_person_cache()
 
         # Create a shared filter
         filter_2 = {
@@ -606,10 +607,13 @@ class UserContextRoutesTestCase(ApiDBTestCase):
         self.log_in_cg_artist()
         result = self.get(path)
         self.assertEqual(len(result["asset"][project_id]), 2)
-        self.assertEqual(result["asset"][project_id][0]["name"], "my filter")
-        self.assertEqual(result["asset"][project_id][0]["is_shared"], False)
-        self.assertEqual(result["asset"][project_id][1]["name"], "team filter")
-        self.assertEqual(result["asset"][project_id][1]["is_shared"], True)
+        asset_filters = sorted(
+            result["asset"][project_id], key=lambda x: x["name"]
+        )
+        self.assertEqual(asset_filters[0]["name"], "my filter")
+        self.assertEqual(asset_filters[0]["is_shared"], False)
+        self.assertEqual(asset_filters[1]["name"], "team filter")
+        self.assertEqual(asset_filters[1]["is_shared"], True)
 
         projects_service.add_team_member(
             self.project_id, self.user_cg_artist["id"]
@@ -658,10 +662,11 @@ class UserContextRoutesTestCase(ApiDBTestCase):
         result = self.get(path)
         user_service.clear_filter_cache()
         self.assertEqual(len(result["asset"][project_id]), 2)
-        self.assertEqual(result["asset"][project_id][0]["name"], "my filter")
-        self.assertEqual(
-            result["asset"][project_id][1]["name"], "team updated"
+        asset_filters = sorted(
+            result["asset"][project_id], key=lambda x: x["name"]
         )
+        self.assertEqual(asset_filters[0]["name"], "my filter")
+        self.assertEqual(asset_filters[1]["name"], "team updated")
 
         # Filter is shared with the artist's department
         self.log_in_admin()
@@ -676,25 +681,23 @@ class UserContextRoutesTestCase(ApiDBTestCase):
         result = self.get(path)
         user_service.clear_filter_cache()
         self.assertEqual(len(result["asset"][project_id]), 2)
-        self.assertEqual(
-            result["asset"][project_id][0]["name"], "team updated"
+        asset_filters = sorted(
+            result["asset"][project_id], key=lambda x: x["name"]
         )
-        self.assertEqual(
-            result["asset"][project_id][1]["name"], "department updated"
-        )
+        self.assertEqual(asset_filters[0]["name"], "department updated")
+        self.assertEqual(asset_filters[1]["name"], "team updated")
 
         # Now artist can see the department filter
         self.log_in_cg_artist()
         user_service.clear_filter_cache()
         result = self.get(path)
         self.assertEqual(len(result["asset"][project_id]), 3)
-        self.assertEqual(
-            result["asset"][project_id][2]["name"], "department updated"
+        asset_filters = sorted(
+            result["asset"][project_id], key=lambda x: x["name"]
         )
-        self.assertEqual(
-            result["asset"][project_id][1]["name"], "team updated"
-        )
-        self.assertEqual(result["asset"][project_id][0]["name"], "my filter")
+        self.assertEqual(asset_filters[0]["name"], "department updated")
+        self.assertEqual(asset_filters[1]["name"], "my filter")
+        self.assertEqual(asset_filters[2]["name"], "team updated")
 
     def test_shared_group_filters(self):
         project_id = str(self.project.id)
@@ -732,6 +735,7 @@ class UserContextRoutesTestCase(ApiDBTestCase):
         artist = persons_service.get_person_raw(self.user_cg_artist["id"])
         artist.departments.append(self.department)
         artist.save()
+        persons_service.clear_person_cache()
 
         # Create a shared filter group
         filter_group_2 = {

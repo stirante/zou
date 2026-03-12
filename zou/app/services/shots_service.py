@@ -23,8 +23,7 @@ from zou.app.models.project import Project
 from zou.app.models.preview_file import PreviewFile
 from zou.app.models.schedule_item import ScheduleItem
 from zou.app.models.subscription import Subscription
-from zou.app.models.task import Task
-from zou.app.models.task import assignees_table
+from zou.app.models.task import Task, TaskPersonLink
 from zou.app.models.time_spent import TimeSpent
 
 from zou.app.services import (
@@ -94,10 +93,12 @@ def get_camera_type():
     return entities_service.get_entity_type_by_name("Camera")
 
 
-def get_episodes(criterions={}):
+def get_episodes(criterions=None):
     """
     Get all episodes for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     episode_type = get_episode_type()
     criterions["entity_type_id"] = episode_type["id"]
     query = Entity.query.order_by(Entity.name)
@@ -109,10 +110,12 @@ def get_episodes(criterions={}):
     return Entity.serialize_list(episodes, obj_type="Episode")
 
 
-def get_sequences(criterions={}):
+def get_sequences(criterions=None):
     """
     Get all sequences for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     sequence_type = get_sequence_type()
     criterions["entity_type_id"] = sequence_type["id"]
     query = Entity.query.order_by(Entity.name)
@@ -124,10 +127,12 @@ def get_sequences(criterions={}):
     return Entity.serialize_list(sequences, obj_type="Sequence")
 
 
-def get_shots(criterions={}):
+def get_shots(criterions=None):
     """
     Get all shots for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     shot_type = get_shot_type()
     criterions["entity_type_id"] = shot_type["id"]
     Sequence = aliased(Entity, name="sequence")
@@ -164,10 +169,12 @@ def get_shots(criterions={}):
     return shots
 
 
-def get_scenes(criterions={}):
+def get_scenes(criterions=None):
     """
     Get all scenes for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     scene_type = get_scene_type()
     criterions["entity_type_id"] = scene_type["id"]
     Sequence = aliased(Entity, name="sequence")
@@ -204,10 +211,12 @@ def get_scenes(criterions={}):
     return scenes
 
 
-def get_episode_map(criterions={}):
+def get_episode_map(criterions=None):
     """
     Returns a dict where keys are episode_id and values are episodes.
     """
+    if criterions is None:
+        criterions = {}
     episodes = get_episodes(criterions)
     episode_map = {}
     for episode in episodes:
@@ -215,10 +224,12 @@ def get_episode_map(criterions={}):
     return episode_map
 
 
-def get_shots_and_tasks(criterions={}):
+def get_shots_and_tasks(criterions=None):
     """
     Get all shots for given criterions with related tasks for each shot.
     """
+    if criterions is None:
+        criterions = {}
     shot_type = get_shot_type()
     shot_map = {}
     task_map = {}
@@ -234,7 +245,7 @@ def get_shots_and_tasks(criterions={}):
         .join(Sequence, Sequence.id == Entity.parent_id)
         .outerjoin(Episode, Episode.id == Sequence.parent_id)
         .outerjoin(Task, Task.entity_id == Entity.id)
-        .outerjoin(assignees_table)
+        .outerjoin(TaskPersonLink)
         .add_columns(
             Episode.name,
             Episode.id,
@@ -257,7 +268,7 @@ def get_shots_and_tasks(criterions={}):
             Task.nb_assets_ready,
             Task.difficulty,
             Task.nb_drawings,
-            assignees_table.columns.person,
+            TaskPersonLink.person_id,
             Project.id,
             Project.name,
         )
@@ -859,6 +870,7 @@ def remove_shot(shot_id, force=False):
         EntityLink.delete_all_by(entity_out_id=shot_id)
         EntityConceptLink.delete_all_by(entity_in_id=shot_id)
         EntityConceptLink.delete_all_by(entity_out_id=shot_id)
+        deletion_service.remove_output_files_for_entity(shot_id)
 
         shot.delete()
         events.emit(
@@ -910,6 +922,7 @@ def remove_sequence(sequence_id, force=False):
             deletion_service.remove_task(task.id, force=True)
             tasks_service.clear_task_cache(str(task.id))
         Subscription.delete_all_by(entity_id=sequence_id)
+        deletion_service.remove_output_files_for_entity(sequence_id)
     try:
         sequence.delete()
         events.emit(

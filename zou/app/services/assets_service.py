@@ -14,12 +14,12 @@ from zou.app.models.entity import (
 from zou.app.models.entity_type import EntityType
 from zou.app.models.subscription import Subscription
 from zou.app.models.project import Project
-from zou.app.models.task import Task
+from zou.app.models.task import Task, TaskPersonLink
 from zou.app.models.asset_instance import AssetInstance
-from zou.app.models.task import assignees_table
 
 from zou.app.services import (
     base_service,
+    breakdown_service,
     deletion_service,
     edits_service,
     index_service,
@@ -84,10 +84,12 @@ def build_entity_type_asset_type_filter():
     return ~EntityType.id.in_(ids_to_exclude)
 
 
-def get_assets(criterions={}, is_admin=False):
+def get_assets(criterions=None, is_admin=False):
     """
     Get all assets for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     query = Entity.query.filter(build_asset_type_filter())
     assigned_to = False
     episode_id = None
@@ -138,11 +140,13 @@ def get_all_raw_assets():
     return query.all()
 
 
-def get_full_assets(criterions={}):
+def get_full_assets(criterions=None):
     """
     Get all assets for given criterions with additional informations: project
     name and asset type name.
     """
+    if criterions is None:
+        criterions = {}
     assigned_to = False
     if "assigned_to" in criterions:
         assigned_to = True
@@ -169,10 +173,12 @@ def get_full_assets(criterions={}):
     return assets
 
 
-def get_assets_and_tasks(criterions={}, with_episode_ids=False):
+def get_assets_and_tasks(criterions=None, with_episode_ids=False):
     """
     Get all assets for given criterions with related tasks for each asset.
     """
+    if criterions is None:
+        criterions = {}
     asset_map = {}
     task_map = {}
     Episode = aliased(Entity, name="episode")
@@ -184,7 +190,7 @@ def get_assets_and_tasks(criterions={}, with_episode_ids=False):
         Entity.query.filter(build_asset_type_filter())
         .join(EntityType, Entity.entity_type_id == EntityType.id)
         .outerjoin(Task)
-        .outerjoin(assignees_table)
+        .outerjoin(TaskPersonLink)
     )
 
     tasks_query = query.add_columns(
@@ -204,7 +210,7 @@ def get_assets_and_tasks(criterions={}, with_episode_ids=False):
         Task.last_comment_date,
         Task.last_preview_file_id,
         Task.difficulty,
-        assignees_table.columns.person,
+        TaskPersonLink.person_id,
     ).order_by(EntityType.name, Entity.name)
 
     if "id" in criterions:
@@ -373,10 +379,12 @@ def get_assets_and_tasks(criterions={}, with_episode_ids=False):
 
 
 @cache.memoize_function(240)
-def get_asset_types(criterions={}):
+def get_asset_types(criterions=None):
     """
     Retrieve all asset types available.
     """
+    if criterions is None:
+        criterions = {}
     query = EntityType.query.filter(build_entity_type_asset_type_filter())
     query = query_utils.apply_criterions_to_db_query(Entity, query, criterions)
     return EntityType.serialize_list(
@@ -469,7 +477,7 @@ def get_full_asset(asset_id):
     """
     assets = get_assets_and_tasks({"id": asset_id}, with_episode_ids=True)
     if len(assets) > 0:
-        asset = get_asset(asset_id, relations=True)
+        asset = dict(get_asset(asset_id, relations=True))
         asset_type_id = asset["entity_type_id"]
         asset_type = get_asset_type(asset_type_id)
         project = Project.get(asset["project_id"])
@@ -568,7 +576,12 @@ def is_asset_type(entity_type):
     """
     Returns true if given entity type is an asset, not a shot.
     """
-    return str(entity_type.id) not in get_temporal_type_ids()
+    entity_type_id = ""
+    if isinstance(entity_type, dict):
+        entity_type_id = entity_type.get("id", "")
+    else:
+        entity_type_id = str(entity_type.id)
+    return entity_type_id not in get_temporal_type_ids()
 
 
 def create_asset_types(asset_type_names):
@@ -649,15 +662,23 @@ def remove_asset(asset_id, force=False):
             {"asset_id": asset_id},
             project_id=str(asset.project_id),
         )
+        breakdown_service.refresh_casting_stats(
+            asset.serialize(obj_type="Asset")
+        )
     else:
         from zou.app.services import tasks_service
+
+        # Before deleting EntityLinks, collect affected shot IDs so we can
+        # refresh their casting stats after deletion
+        cast_in = breakdown_service.get_cast_in(asset_id)
+        affected_shot_ids = {
+            entity["shot_id"] for entity in cast_in if "shot_id" in entity
+        }
 
         tasks = Task.query.filter_by(entity_id=asset_id).all()
         for task in tasks:
             deletion_service.remove_task(task.id, force=True)
             tasks_service.clear_task_cache(str(task.id))
-        asset.delete()
-        clear_asset_cache(str(asset_id))
         index_service.remove_asset_index(str(asset_id))
         events.emit(
             "asset:delete",
@@ -670,6 +691,14 @@ def remove_asset(asset_id, force=False):
         EntityLink.delete_all_by(entity_out_id=asset_id)
         EntityConceptLink.delete_all_by(entity_in_id=asset_id)
         EntityConceptLink.delete_all_by(entity_out_id=asset_id)
+        deletion_service.remove_output_files_for_entity(asset_id)
+        asset.delete()
+        clear_asset_cache(str(asset_id))
+
+        if affected_shot_ids:
+            for shot_id in affected_shot_ids:
+                shot = shots_service.get_shot(shot_id)
+                breakdown_service.refresh_shot_casting_stats(shot)
     deleted_asset = asset.serialize(obj_type="Asset")
     return deleted_asset
 
@@ -739,7 +768,7 @@ def set_shared_assets(
     Set all assets of a project to is_shared=True or False.
     """
 
-    query = Entity.query.filter(build_asset_type_filter()).filter()
+    query = Entity.query.filter(build_asset_type_filter())
 
     if project_id is not None:
         query = query.filter(Entity.project_id == project_id)

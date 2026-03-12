@@ -15,8 +15,7 @@ from zou.app.models.entity import (
 )
 from zou.app.models.project import Project
 from zou.app.models.subscription import Subscription
-from zou.app.models.task import Task
-from zou.app.models.task import assignees_table
+from zou.app.models.task import Task, TaskPersonLink
 
 from zou.app.services import (
     deletion_service,
@@ -127,10 +126,12 @@ def remove_concept(concept_id, force=False):
     return deleted_concept
 
 
-def get_concepts(criterions={}):
+def get_concepts(criterions=None):
     """
     Get all concepts for given criterions.
     """
+    if criterions is None:
+        criterions = {}
     concept_type = get_concept_type()
     criterions["entity_type_id"] = concept_type["id"]
     is_only_assignation = "assigned_to" in criterions
@@ -163,10 +164,12 @@ def get_concepts(criterions={}):
     return concepts
 
 
-def get_concepts_and_tasks(criterions={}):
+def get_concepts_and_tasks(criterions=None):
     """
     Get all concepts for given criterions with related tasks for each concept.
     """
+    if criterions is None:
+        criterions = {}
     concept_type = get_concept_type()
     concept_map = {}
     task_map = {}
@@ -177,7 +180,7 @@ def get_concepts_and_tasks(criterions={}):
     query = (
         Entity.query.join(Project, Project.id == Entity.project_id)
         .outerjoin(Task, Task.entity_id == Entity.id)
-        .outerjoin(assignees_table)
+        .outerjoin(TaskPersonLink)
         .add_columns(
             Task.id,
             Task.task_type_id,
@@ -192,7 +195,7 @@ def get_concepts_and_tasks(criterions={}):
             Task.due_date,
             Task.last_comment_date,
             Task.nb_assets_ready,
-            assignees_table.columns.person,
+            TaskPersonLink.person_id,
             Project.id,
             Project.name,
         )

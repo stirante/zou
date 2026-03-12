@@ -19,6 +19,7 @@ from zou.app.services import (
     assets_service,
     base_service,
     breakdown_service,
+    deletion_service,
     entities_service,
     news_service,
     notifications_service,
@@ -32,9 +33,10 @@ from zou.app.services.exception import (
     AttachmentFileNotFoundException,
     WrongParameterException,
     AssetNotFoundException,
+    ReplyNotFoundException,
 )
 
-from zou.app.utils import cache, date_helpers, events, fs, fields, date_helpers
+from zou.app.utils import cache, date_helpers, events, fs, fields
 from zou.app.stores import file_store
 from zou.app import config
 
@@ -74,18 +76,28 @@ def create_comment(
     task_id,
     task_status_id,
     text,
-    checklist=[],
-    files={},
+    checklist=None,
+    files=None,
     created_at="",
-    links=[],
+    links=None,
+    with_hashtags=True,
 ):
     """
     Create a new comment and related: news, notifications and events.
     """
+    if checklist is None:
+        checklist = []
+    if files is None:
+        files = {}
+    if links is None:
+        links = []
+    related_tasks = []
+    author = _get_comment_author(person_id)
     task = tasks_service.get_task(task_id, relations=True)
     task_status = tasks_service.get_task_status(task_status_id)
-    author = _get_comment_author(person_id)
+    task_type = tasks_service.get_task_type(task["task_type_id"])
     _check_retake_capping(task_status, task)
+
     comment = new_comment(
         task_id=task_id,
         object_type="Task",
@@ -97,6 +109,10 @@ def create_comment(
         created_at=created_at,
         links=links,
     )
+
+    if with_hashtags:
+        _handle_hashtags(author, task_type, task, text)
+
     task, status_changed = _manage_status_change(task_status, task, comment)
     _manage_subscriptions(task, comment, status_changed)
     comment["task_status"] = task_status
@@ -107,7 +123,29 @@ def create_comment(
     )
     for automation in status_automations:
         _run_status_automation(automation, task, person_id)
+
     return comment
+
+
+def _handle_hashtags(person, task_type, task, text):
+    hashtags = get_comment_hashtags(text)
+    if len(hashtags) > 0:
+        entity = entities_service.get_entity(entity_id=task["entity_id"])
+        tasks = entities_service.get_entity_tasks(entity)
+        tasks = filter_tasks_by_hashtags(tasks, hashtags, task_type)
+        if len(tasks) > 0:
+            for _task in tasks:
+                task_status = tasks_service.get_task_status(
+                    _task["task_status_id"]
+                )
+                create_comment(
+                    person_id=person["id"],
+                    task_id=_task["id"],
+                    text=text + f"\n\n____\nFrom {task_type['name']} task",
+                    task_status_id=task_status["id"],
+                    with_hashtags=False,
+                )
+    return hashtags
 
 
 def _check_retake_capping(task_status, task):
@@ -115,7 +153,6 @@ def _check_retake_capping(task_status, task):
         project = projects_service.get_project(task["project_id"])
         project_max_retakes = project["max_retakes"] or 0
         if project_max_retakes > 0:
-            entity = entities_service.get_entity_raw(task["entity_id"])
             entity = entities_service.get_entity(task["entity_id"])
             entity_data = entity.get("data", {}) or {}
             entity_max_retakes = entity_data.get("max_retakes", None)
@@ -152,17 +189,15 @@ def _manage_status_change(task_status, task, comment):
         if status_changed:
             if task_status["is_retake"]:
                 retake_count = task["retake_count"]
-                if retake_count is None or retake_count == "NoneType":
+                if retake_count is None:
                     retake_count = 0
                 new_data["retake_count"] = retake_count + 1
 
             if task_status["is_feedback_request"]:
-                new_data["end_date"] = date_helpers.get_utc_now_datetime()
+                if task.get("end_date") is None:
+                    new_data["end_date"] = date_helpers.get_utc_now_datetime()
 
-            if (
-                task_status["short_name"] == "wip"
-                and task["real_start_date"] is None
-            ):
+            if task_status["is_wip"] and task["real_start_date"] is None:
                 new_data["real_start_date"] = datetime.datetime.now(
                     datetime.timezone.utc
                 )
@@ -274,9 +309,12 @@ def _run_status_automation(automation, task, person_id):
 
     elif automation["out_field_type"] == "ready_for":
         try:
-            asset = assets_service.update_asset(
-                task["entity_id"],
-                {"ready_for": automation["out_task_type_id"]},
+            data = {"ready_for": automation["out_task_type_id"]}
+            asset = assets_service.update_asset(task["entity_id"], data)
+            events.emit(
+                "asset:update",
+                {"asset_id": task["entity_id"], "data": data},
+                project_id=task["project_id"],
             )
             breakdown_service.refresh_casting_stats(asset)
         except AssetNotFoundException:
@@ -289,15 +327,21 @@ def new_comment(
     person_id,
     text,
     object_type="Task",
-    files={},
-    checklist=[],
+    files=None,
+    checklist=None,
     created_at="",
-    links=[],
+    links=None,
 ):
     """
     Create a new comment for given object (by default, it considers this object
     as a Task).
     """
+    if files is None:
+        files = {}
+    if checklist is None:
+        checklist = []
+    if links is None:
+        links = []
     created_at_date = None
     task = tasks_service.get_task(task_id)
     if created_at is not None and len(created_at) > 0:
@@ -358,7 +402,7 @@ def reset_mentions(comment):
     return comment_dict
 
 
-def create_attachment(comment, uploaded_file, randomize=False):
+def create_attachment(comment, uploaded_file, randomize=False, reply_id=None):
     tmp_folder = current_app.config["TMP_DIR"]
     filename = uploaded_file.filename
     mimetype = uploaded_file.mimetype
@@ -369,11 +413,19 @@ def create_attachment(comment, uploaded_file, randomize=False):
         filename = f"{filename[:len(filename) - len(extension) - 1]}"
         filename += f"-{random_str}.{extension}"
 
+    if reply_id is not None:
+        is_reply_present = any(
+            reply["id"] == reply_id for reply in comment.get("replies", [])
+        )
+        if not is_reply_present:
+            reply_id = None
+
     attachment_file = AttachmentFile.create(
         name=filename,
         size=0,
         extension=extension,
         mimetype=mimetype,
+        reply_id=reply_id,
         comment_id=comment["id"],
     )
     attachment_file_id = str(attachment_file.id)
@@ -458,11 +510,13 @@ def _send_ack_event(project_id, comment, user_id, name="acknowledge"):
     )
 
 
-def reply_comment(comment_id, text, person_id=None):
+def reply_comment(comment_id, text, person_id=None, files=None):
     """
     Add a reply entry to the JSONB field of given comment model. Create
     notifications needed for this.
     """
+    if files is None:
+        files = {}
     person = None
     if person_id is None:
         person = persons_service.get_current_user()
@@ -472,6 +526,7 @@ def reply_comment(comment_id, text, person_id=None):
     task = tasks_service.get_task(comment.object_id, relations=True)
     if comment.replies is None:
         comment.replies = []
+
     reply = {
         "id": str(fields.gen_uuid()),
         "date": date_helpers.get_now(),
@@ -486,31 +541,50 @@ def reply_comment(comment_id, text, person_id=None):
     replies = list(comment.replies)
     replies.append(reply)
     comment.update({"replies": replies})
+    comment_dict = comment.serialize(relations=True)
+    if len(files.keys()) > 0:
+        _, new_attachment_files = add_attachments_to_comment(
+            comment_dict, files, reply_id=reply["id"]
+        )
+        for new_attachment_file in new_attachment_files:
+            new_attachment_file["reply_id"] = reply["id"]
+        reply["attachment_files"] = new_attachment_files
     tasks_service.clear_comment_cache(comment_id)
     events.emit(
         "comment:reply",
         {
             "task_id": task["id"],
-            "comment_id": str(comment.id),
+            "comment_id": comment_id,
             "reply_id": reply["id"],
         },
         project_id=task["project_id"],
     )
     notifications_service.create_notifications_for_task_and_reply(
-        task, comment.serialize(), reply
+        task, comment_dict, reply
     )
     return reply
 
 
 def get_reply(comment_id, reply_id):
     comment = tasks_service.get_comment_raw(comment_id)
-    reply = next(reply for reply in comment.replies if reply["id"] == reply_id)
-    return reply
+    if comment.replies is None:
+        comment.replies = []
+    for reply in comment.replies:
+        if reply.get("id") == reply_id:
+            return reply
+    raise ReplyNotFoundException
 
 
 def delete_reply(comment_id, reply_id):
     comment = tasks_service.get_comment_raw(comment_id)
     task = tasks_service.get_task(comment.object_id)
+
+    if comment.attachment_files is not None:
+        for attachment_file in comment.attachment_files:
+            if attachment_file.reply_id == reply_id:
+                deletion_service.remove_attachment_file_by_id(
+                    str(attachment_file.id)
+                )
     if comment.replies is None:
         comment.replies = []
     comment.replies = [
@@ -570,19 +644,64 @@ def get_comment_department_mention_ids(project_id, text):
     ]
 
 
-def add_attachments_to_comment(comment, files):
+def get_comment_hashtags(text):
+    """
+    Check for task type mentions (#full name) in text and returns matching
+    tags. If all is present, return only all because it includes everything
+    else.
+    """
+    hashtags = [
+        hashtag[1:].lower()
+        for hashtag in re.findall("#[a-zA-Z]*", text, re.IGNORECASE)
+    ]
+    if "all" in hashtags:
+        return ["all"]
+    return list(set(hashtags))
+
+
+def filter_tasks_by_hashtags(tasks, hashtags, original_task_type):
+    """
+    Filter tasks based on hashtags, excluding specified task types.
+    """
+    if "all" in hashtags:
+        return [
+            task
+            for task in tasks
+            if task["task_type_name"].lower()
+            != original_task_type["name"].lower()
+        ]
+    else:
+        hashtag_map = {
+            hashtag: True
+            for hashtag in hashtags
+            if hashtag != original_task_type["name"].lower()
+        }
+        return [
+            task
+            for task in tasks
+            if hashtag_map.get(task["task_type_name"].lower(), False)
+        ]
+
+
+def add_attachments_to_comment(comment, files, reply_id=None):
     """
     Create an attachment entry and for each given uploaded files and tie it
     to given comment.
     """
-    comment["attachment_files"] = []
+    if comment.get("attachment_files", None) is None:
+        comment["attachment_files"] = []
+    new_attachment_files = []
     for uploaded_file in files.values():
         try:
-            attachment_file = create_attachment(comment, uploaded_file)
-            comment["attachment_files"].append(attachment_file)
-        except IntegrityError:
             attachment_file = create_attachment(
-                comment, uploaded_file, randomize=True
+                comment, uploaded_file, reply_id=reply_id
             )
             comment["attachment_files"].append(attachment_file)
-    return comment
+            new_attachment_files.append(attachment_file)
+        except IntegrityError:
+            attachment_file = create_attachment(
+                comment, uploaded_file, randomize=True, reply_id=reply_id
+            )
+            comment["attachment_files"].append(attachment_file)
+            new_attachment_files.append(attachment_file)
+    return comment, new_attachment_files

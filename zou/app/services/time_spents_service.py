@@ -1,6 +1,7 @@
 import datetime
 
 from dateutil import relativedelta
+from collections import defaultdict
 
 from sqlalchemy import func
 from sqlalchemy.exc import DataError
@@ -18,7 +19,7 @@ from zou.app.models.person import Person
 
 from zou.app.utils import fields, date_helpers
 
-from zou.app.services import user_service
+from zou.app.services import user_service, projects_service
 from zou.app.services.exception import WrongDateFormatException
 
 
@@ -183,7 +184,10 @@ def get_time_spents_for_month(
     """
     Return all time spents for given month.
     """
-    date = datetime.datetime(int(year), int(month), 1)
+    month_int = int(month)
+    if month_int < 1 or month_int > 12:
+        raise WrongDateFormatException
+    date = datetime.datetime(int(year), month_int, 1)
     next_month = date + relativedelta.relativedelta(months=1)
     query = TimeSpent.query.filter(TimeSpent.date >= date).filter(
         TimeSpent.date < next_month
@@ -572,3 +576,70 @@ def get_project_month_time_spents(project_id, timezone=None):
             "total"
         ] += time_spent.duration
     return data
+
+
+def get_project_task_type_time_spents(
+    project_id, task_type_id, start_date, end_date
+):
+    """
+    Returns time spents for project and task type in a date range.
+    """
+    try:
+        query = TimeSpent.query.join(Task).filter(
+            Task.project_id == project_id, Task.task_type_id == task_type_id
+        )
+        if start_date is not None:
+            query = query.filter(
+                TimeSpent.date >= func.cast(start_date, TimeSpent.date.type)
+            )
+        if end_date is not None:
+            query = query.filter(
+                TimeSpent.date <= func.cast(end_date, TimeSpent.date.type)
+            )
+
+        time_spents = query.order_by(TimeSpent.date.desc()).all()
+
+        result = defaultdict(list)
+        for ts in time_spents:
+            result[str(ts.person_id)].append(ts.serialize())
+
+    except DataError:
+        raise WrongDateFormatException
+    return dict(result)
+
+
+def get_day_offs_between_for_project(
+    project_id,
+    start_date=None,
+    end_date=None,
+    safe=False,
+    current_user_id=None,
+):
+    """
+    Get all day off entries for project, start and end date.
+    """
+    project = projects_service.get_project(project_id, relations=True)
+    try:
+        query = DayOff.query.filter(DayOff.person_id.in_(project["team"]))
+        if start_date is not None:
+            query = query.filter(
+                func.cast(start_date, DayOff.end_date.type) <= DayOff.end_date
+            )
+        if end_date is not None:
+            query = query.filter(
+                func.cast(end_date, DayOff.date.type) >= DayOff.date
+            )
+
+        days_offs = query.order_by(DayOff.date).all()
+
+        result = defaultdict(list)
+        for day_off in days_offs:
+            day_off_person_id = str(day_off.person_id)
+            result[day_off_person_id].append(
+                day_off.serialize()
+                if safe or current_user_id == day_off_person_id
+                else day_off.serialize_safe()
+            )
+    except DataError:
+        raise WrongDateFormatException
+    return dict(result)
