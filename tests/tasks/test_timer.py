@@ -163,6 +163,19 @@ class TimerTestCase(ApiDBTestCase):
         self.assertIsNone(TimeSpent.get(ts.id))
         self.assertEqual(Task.get(self.task.id).duration, 0)
 
+    def test_admin_can_delete_other_user_timer(self):
+        self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
+        timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        timer.start_time = timer.start_time - datetime.timedelta(minutes=1)
+        timer.save()
+        self.post("/actions/tasks/timer/end", {})
+
+        self.log_in_admin()
+        self.delete(f"/actions/tasks/timer/{timer.id}")
+
+        self.assertIsNone(Timer.get(timer.id))
+        self.assertEqual(TimeSpent.get_all_by(timer_id=timer.id), [])
+
     def test_update_timer_inside_other_error(self):
         self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
         timer1 = Timer.get_by(person_id=self.person.id, end_time=None)
@@ -329,3 +342,52 @@ class TimerTestCase(ApiDBTestCase):
         self.post("/actions/tasks/timer/end", {})
         timer = self.get("/data/timers/current")
         self.assertIsNone(timer)
+
+    def test_list_user_timers_uses_local_day_overlap(self):
+        self.person.timezone = timezone("Australia/Sydney")
+        self.person.save()
+
+        self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
+        timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        start = datetime.datetime(2020, 1, 3, 12, 50, 0)
+        end = datetime.datetime(2020, 1, 3, 13, 10, 0)
+        self.patch(
+            f"/actions/tasks/timer/{timer.id}",
+            {
+                "start_time": date_helpers.get_date_string(start),
+                "end_time": date_helpers.get_date_string(end),
+            },
+        )
+
+        result = self.get("/data/timers?date=2020-01-04&embed_task=true")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["id"], str(timer.id))
+
+    def test_timer_time_spent_is_split_by_person_timezone(self):
+        self.person.timezone = timezone("Australia/Sydney")
+        self.person.save()
+
+        self.post(f"/actions/tasks/{self.task.id}/timer/start", {})
+        timer = Timer.get_by(person_id=self.person.id, end_time=None)
+        start = datetime.datetime(2020, 1, 3, 12, 50, 0)
+        end = datetime.datetime(2020, 1, 3, 13, 10, 0)
+        self.patch(
+            f"/actions/tasks/timer/{timer.id}",
+            {
+                "start_time": date_helpers.get_date_string(start),
+                "end_time": date_helpers.get_date_string(end),
+            },
+        )
+
+        time_spents = sorted(
+            TimeSpent.get_all_by(timer_id=timer.id), key=lambda row: row.date
+        )
+        self.assertEqual(len(time_spents), 2)
+        self.assertEqual(
+            [time_spent.date.isoformat() for time_spent in time_spents],
+            ["2020-01-03", "2020-01-04"],
+        )
+        self.assertEqual(
+            [time_spent.duration for time_spent in time_spents], [10, 10]
+        )
+        self.assertEqual(Task.get(self.task.id).duration, 20)

@@ -650,13 +650,19 @@ def check_time_spent_access(task_id, person_id):
     return is_allowed
 
 
-def check_timer_access(timer_id):
-    """Return True if current user started the timer."""
+def check_timer_access(timer_id, allow_admin=False):
+    """Return True if current user started the timer.
+
+    When ``allow_admin`` is True, admins may access timers started by other
+    users. This is intentionally narrower than edit access.
+    """
 
     timer = Timer.get(timer_id)
     if timer is None:
         raise TimerNotFoundException()
     current_user_id = persons_service.get_current_user()["id"]
+    if allow_admin and permissions.has_admin_permissions():
+        return True
     if str(timer.person_id) != current_user_id:
         raise permissions.PermissionDenied
     return True

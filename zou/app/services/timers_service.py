@@ -2,6 +2,7 @@ import datetime
 
 from pytz import UTC
 from pytz import timezone as pytz_timezone
+from sqlalchemy import or_
 
 from zou.app.models.task import Task
 from zou.app.models.time_spent import TimeSpent
@@ -66,34 +67,16 @@ def end_timer(timer_id=None):
         delete_timer(timer.id)
         raise WrongParameterException("Timer too short")
     timer.save()
-    time_spent = TimeSpent.create(
-        task_id=timer.task_id,
-        person_id=timer.person_id,
-        date=timer.date,
-        duration=duration,
-        timer_id=timer.id,
-    )
     task = Task.get(timer.task_id)
-    task.duration = sum(
-        ts.duration for ts in TimeSpent.get_all_by(task_id=timer.task_id)
-    )
-    task.save()
-    events.emit(
-        "time-spent:new",
-        {"time_spent_id": str(time_spent.id)},
-        project_id=str(task.project_id),
-    )
-    events.emit(
-        "task:update",
-        {"task_id": timer.task_id},
-        project_id=str(task.project_id),
-    )
+    _sync_timer_time_spents(timer, str(task.project_id))
     events.emit(
         "timer:end",
         {"timer_id": str(timer.id)},
         project_id=str(task.project_id),
     )
-    return time_spent.serialize()
+    time_spents = TimeSpent.get_all_by(timer_id=timer.id)
+    latest_time_spent = max(time_spents, key=lambda time_spent: time_spent.date)
+    return latest_time_spent.serialize()
 
 
 def discard_timer():
@@ -111,13 +94,13 @@ def delete_timer(timer_id):
     timer = Timer.get(timer_id)
     if timer is None:
         raise TimerNotFoundException()
-    user_service.check_timer_access(timer_id)
+    user_service.check_timer_access(timer_id, allow_admin=True)
 
     task = Task.get(timer.task_id)
     project_id = str(task.project_id)
 
-    time_spent = TimeSpent.get_by(timer_id=timer.id)
-    if time_spent is not None:
+    time_spents = TimeSpent.get_all_by(timer_id=timer.id)
+    for time_spent in time_spents:
         time_spent.delete()
         events.emit(
             "time-spent:delete",
@@ -215,40 +198,7 @@ def update_timer(timer_id, start_time=None, end_time=None):
     project_id = str(Task.get(timer.task_id).project_id)
 
     if timer.end_time is not None:
-        duration = round(
-            (timer.end_time - timer.start_time).total_seconds() / 60
-        )
-        time_spent = TimeSpent.get_by(timer_id=timer.id)
-        if time_spent is None:
-            time_spent = TimeSpent.create(
-                task_id=timer.task_id,
-                person_id=timer.person_id,
-                date=timer.date,
-                duration=duration,
-                timer_id=timer.id,
-            )
-            events.emit(
-                "time-spent:new",
-                {"time_spent_id": str(time_spent.id)},
-                project_id=project_id,
-            )
-        else:
-            time_spent.duration = duration
-            time_spent.save()
-            events.emit(
-                "time-spent:update",
-                {"time_spent_id": str(time_spent.id)},
-                project_id=project_id,
-            )
-
-        task = Task.get(timer.task_id)
-        task.duration = sum(
-            ts.duration for ts in TimeSpent.get_all_by(task_id=timer.task_id)
-        )
-        task.save()
-        events.emit(
-            "task:update", {"task_id": str(task.id)}, project_id=project_id
-        )
+        _sync_timer_time_spents(timer, project_id)
 
     events.emit(
         "timer:update", {"timer_id": str(timer.id)}, project_id=project_id
@@ -288,7 +238,8 @@ def get_timers_for_user(person_id, date=None, embed_task=False):
         start_utc = start_local.astimezone(UTC).replace(tzinfo=None)
         end_utc = end_local.astimezone(UTC).replace(tzinfo=None)
         query = query.filter(
-            Timer.start_time >= start_utc, Timer.start_time < end_utc
+            Timer.start_time < end_utc,
+            or_(Timer.end_time.is_(None), Timer.end_time > start_utc),
         )
 
     query = query.order_by(Timer.start_time.desc())
@@ -335,3 +286,116 @@ def _find_timers_inside(person_id, outer_start, outer_end, exclude_id):
         )
 
     return q.all()
+
+
+def _get_timer_timezone(timer):
+    person = persons_service.get_person_raw(timer.person_id)
+    return pytz_timezone(str(person.timezone or user_service.get_timezone()))
+
+
+def _get_timer_day_durations(timer):
+    if timer.end_time is None:
+        return {}
+
+    total_minutes = round(
+        (timer.end_time - timer.start_time).total_seconds() / 60
+    )
+    if total_minutes <= 0:
+        return {}
+
+    timezone = _get_timer_timezone(timer)
+    start_utc = UTC.localize(timer.start_time)
+    end_utc = UTC.localize(timer.end_time)
+    start_local = start_utc.astimezone(timezone)
+    end_local = end_utc.astimezone(timezone)
+
+    current_day = start_local.date()
+    last_day = end_local.date()
+    segments = []
+    while current_day <= last_day:
+        day_start = timezone.localize(
+            datetime.datetime.combine(current_day, datetime.time.min)
+        )
+        next_day = timezone.localize(
+            datetime.datetime.combine(
+                current_day + datetime.timedelta(days=1),
+                datetime.time.min,
+            )
+        )
+        overlap_start = max(start_local, day_start)
+        overlap_end = min(end_local, next_day)
+        if overlap_end > overlap_start:
+            raw_minutes = (overlap_end - overlap_start).total_seconds() / 60
+            whole_minutes = int(raw_minutes)
+            segments.append(
+                {
+                    "date": current_day,
+                    "minutes": whole_minutes,
+                    "fraction": raw_minutes - whole_minutes,
+                }
+            )
+        current_day += datetime.timedelta(days=1)
+
+    distributed_minutes = sum(segment["minutes"] for segment in segments)
+    remainder = max(total_minutes - distributed_minutes, 0)
+    for segment in sorted(
+        segments, key=lambda value: value["fraction"], reverse=True
+    )[:remainder]:
+        segment["minutes"] += 1
+
+    return {
+        segment["date"]: segment["minutes"]
+        for segment in segments
+        if segment["minutes"] > 0
+    }
+
+
+def _sync_timer_time_spents(timer, project_id):
+    desired = _get_timer_day_durations(timer)
+    existing = {
+        time_spent.date: time_spent
+        for time_spent in TimeSpent.get_all_by(timer_id=timer.id)
+    }
+
+    for date, time_spent in existing.items():
+        if date not in desired:
+            time_spent.delete()
+            events.emit(
+                "time-spent:delete",
+                {"time_spent_id": str(time_spent.id)},
+                project_id=project_id,
+            )
+
+    for date, duration in desired.items():
+        time_spent = existing.get(date)
+        if time_spent is None:
+            time_spent = TimeSpent.create(
+                task_id=timer.task_id,
+                person_id=timer.person_id,
+                date=date,
+                duration=duration,
+                timer_id=timer.id,
+            )
+            events.emit(
+                "time-spent:new",
+                {"time_spent_id": str(time_spent.id)},
+                project_id=project_id,
+            )
+        elif time_spent.duration != duration:
+            time_spent.duration = duration
+            time_spent.save()
+            events.emit(
+                "time-spent:update",
+                {"time_spent_id": str(time_spent.id)},
+                project_id=project_id,
+            )
+
+    task = Task.get(timer.task_id)
+    task.duration = sum(
+        time_spent.duration
+        for time_spent in TimeSpent.get_all_by(task_id=timer.task_id)
+    )
+    task.save()
+    events.emit(
+        "task:update", {"task_id": str(task.id)}, project_id=project_id
+    )
