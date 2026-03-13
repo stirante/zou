@@ -537,6 +537,7 @@ class BaseBatchComment(BaseNewPreviewFilePicture, ArgsMixin):
                     new_comment["id"],
                     new_comment["person_id"],
                     task_id or comment["task_id"],
+                    revision=comment.get("revision", 0) or 0,
                 )
                 new_preview_file = self.process_uploaded_file(
                     new_preview_file["id"],
