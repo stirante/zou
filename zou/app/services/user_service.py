@@ -1,3 +1,5 @@
+from flask import current_app
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import aliased
 from sqlalchemy import func, or_, and_
 
@@ -1376,10 +1378,18 @@ def get_unread_notifications_count(notification_id=None):
     """
     Return the number of unread notifications.
     """
+    from zou.app import db
+
     current_user = persons_service.get_current_user()
-    return Notification.query.filter_by(
-        person_id=current_user["id"], read=False
-    ).count()
+    try:
+        return Notification.query.filter_by(
+            person_id=current_user["id"], read=False
+        ).count()
+    except ProgrammingError:
+        # Keep context loading available when the DB schema is behind code.
+        db.session.rollback()
+        current_app.logger.exception("Failed to count unread notifications.")
+        return 0
 
 
 def get_last_notifications(
