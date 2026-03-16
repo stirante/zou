@@ -254,6 +254,64 @@ class ProjectDataRoutesTestCase(ApiDBTestCase):
         )
         self.assertIsInstance(result, dict)
 
+    def test_update_project_git_import_config(self):
+        result = self.put(
+            f"/data/projects/{self.project_id}",
+            {
+                "data": {
+                    "git_import": {
+                        "enabled": True,
+                        "repo_url": "https://example.com/repo.git",
+                    }
+                }
+            },
+        )
+        self.assertEqual(
+            result["data"]["git_import"],
+            {
+                "enabled": True,
+                "repo_url": "https://example.com/repo.git",
+            },
+        )
+
+    def test_update_project_git_import_config_preserves_extra_keys(self):
+        result = self.put(
+            f"/data/projects/{self.project_id}",
+            {
+                "data": {
+                    "git_import": {
+                        "enabled": False,
+                        "repo_url": "",
+                        "branch": "main",
+                    },
+                    "custom": "value",
+                }
+            },
+        )
+        self.assertEqual(result["data"]["custom"], "value")
+        self.assertEqual(
+            result["data"]["git_import"],
+            {
+                "enabled": False,
+                "repo_url": "",
+                "branch": "main",
+            },
+        )
+
+    def test_update_project_git_import_requires_repo_url_when_enabled(self):
+        self.put(
+            f"/data/projects/{self.project_id}",
+            {"data": {"git_import": {"enabled": True, "repo_url": ""}}},
+            code=400,
+        )
+
+    def test_update_project_git_import_rejects_invalid_structure(self):
+        self.put(
+            f"/data/projects/{self.project_id}",
+            {"data": {"git_import": "invalid"}},
+            code=400,
+        )
+
 
 class ProjectBudgetRoutesTestCase(ApiDBTestCase):
     def setUp(self):

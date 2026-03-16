@@ -21,6 +21,48 @@ from zou.app.blueprints.crud.base import BaseModelResource, BaseModelsResource
 from zou.app.services.exception import WrongParameterException
 
 
+def normalize_git_import_config(data):
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise WrongParameterException("Invalid project data")
+
+    git_import = data.get("git_import")
+    if git_import is None:
+        return data
+    if not isinstance(git_import, dict):
+        raise WrongParameterException("Invalid git_import configuration")
+
+    normalized_git_import = {
+        "enabled": bool(git_import.get("enabled", False)),
+        "repo_url": "",
+    }
+    repo_url = git_import.get("repo_url", "")
+    if repo_url is None:
+        repo_url = ""
+    if not isinstance(repo_url, str):
+        raise WrongParameterException("Invalid git_import.repo_url")
+    normalized_git_import["repo_url"] = repo_url.strip()
+    if (
+        normalized_git_import["enabled"]
+        and normalized_git_import["repo_url"] == ""
+    ):
+        raise WrongParameterException(
+            "git_import.repo_url is required when enabled"
+        )
+
+    unknown_keys = {
+        key: value
+        for key, value in git_import.items()
+        if key not in normalized_git_import
+    }
+    normalized_git_import.update(unknown_keys)
+
+    normalized_data = dict(data)
+    normalized_data["git_import"] = normalized_git_import
+    return normalized_data
+
+
 class ProjectsResource(BaseModelsResource):
     def __init__(self):
         BaseModelsResource.__init__(self, Project)
@@ -194,6 +236,8 @@ class ProjectsResource(BaseModelsResource):
 
     def update_data(self, data):
         data = super().update_data(data)
+        if "data" in data:
+            data["data"] = normalize_git_import_config(data["data"])
 
         if "project_status_id" not in data:
             data["project_status_id"] = (
@@ -392,6 +436,9 @@ class ProjectResource(BaseModelResource, ArgsMixin):
         return user_service.check_manager_project_access(project["id"])
 
     def pre_update(self, project_dict, data):
+        if "data" in data:
+            data["data"] = normalize_git_import_config(data["data"])
+
         if "preview_background_files" in data:
             data["preview_background_files"] = [
                 files_service.get_preview_background_file_raw(
