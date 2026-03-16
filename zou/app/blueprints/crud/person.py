@@ -286,11 +286,13 @@ class PersonsResource(BaseModelsResource):
             except:
                 raise WrongParameterException("Expiration date is not valid.")
 
-        if "email" in data:
+        if "email" in data and data["email"] not in [None, ""]:
             try:
                 data["email"] = auth.validate_email(data["email"])
             except auth.EmailNotValidException as e:
                 raise WrongParameterException(str(e))
+        elif "email" in data:
+            data["email"] = None
 
         return data
 
@@ -298,7 +300,7 @@ class PersonsResource(BaseModelsResource):
         data = super().update_data(data)
         if "password" in data and data["password"] is not None:
             data["password"] = auth.encrypt_password(data["password"])
-        if "email" in data:
+        if "email" in data and data["email"] is not None:
             data["email"] = data["email"].strip()
         return data
 
@@ -572,11 +574,13 @@ class PersonResource(BaseModelResource, ArgsMixin):
             except:
                 raise WrongParameterException("Expiration date is not valid.")
 
-        if "email" in data:
+        if "email" in data and data["email"] not in [None, ""]:
             try:
                 data["email"] = auth.validate_email(data["email"])
             except auth.EmailNotValidException as e:
                 raise WrongParameterException(str(e))
+        elif "email" in data:
+            data["email"] = None
 
         return data
 
