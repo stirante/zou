@@ -1,5 +1,9 @@
+import datetime
+
 from tests.base import ApiDBTestCase
 
+from zou.app.models.time_spent import TimeSpent
+from zou.app.models.timer import Timer
 from zou.app.services import tasks_service
 
 
@@ -123,6 +127,77 @@ class RouteTimeSpentTestCase(ApiDBTestCase):
         self.assertEqual(time_spents[0]["duration"], 14400)
         self.assertEqual(time_spents[0]["date"], "2017-09-23")
         self.assertEqual(len(time_spents), 1)
+
+    def test_manual_time_spent_does_not_overwrite_timer_linked_row(self):
+        person_id = str(self.person.id)
+        task_id = str(self.task.id)
+
+        timer = Timer.create(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            start_time=datetime.datetime(2017, 9, 23, 10, 0, 0),
+            end_time=datetime.datetime(2017, 9, 23, 11, 0, 0),
+        )
+        timer_spent = TimeSpent.create(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            duration=3600,
+            timer_id=timer.id,
+        )
+
+        self.post(
+            f"/actions/tasks/{task_id}/time-spents/2017-09-23/persons/{person_id}",
+            {"duration": 1200},
+        )
+
+        manual_spent = TimeSpent.get_by(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            timer_id=None,
+        )
+        timer_spent = TimeSpent.get(timer_spent.id)
+
+        self.assertIsNotNone(manual_spent)
+        self.assertEqual(manual_spent.duration, 1200)
+        self.assertIsNotNone(timer_spent)
+        self.assertEqual(timer_spent.duration, 3600)
+
+    def test_manual_delete_does_not_remove_timer_linked_row(self):
+        person_id = str(self.person.id)
+        task_id = str(self.task.id)
+
+        timer = Timer.create(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            start_time=datetime.datetime(2017, 9, 23, 10, 0, 0),
+            end_time=datetime.datetime(2017, 9, 23, 11, 0, 0),
+        )
+        timer_spent = TimeSpent.create(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            duration=3600,
+            timer_id=timer.id,
+        )
+        manual_spent = TimeSpent.create(
+            task_id=task_id,
+            person_id=person_id,
+            date=datetime.date(2017, 9, 23),
+            duration=1200,
+        )
+
+        self.delete(
+            f"/actions/tasks/{task_id}/time-spents/2017-09-23/persons/{person_id}"
+        )
+
+        self.assertIsNone(TimeSpent.get(manual_spent.id))
+        timer_spent = TimeSpent.get(timer_spent.id)
+        self.assertIsNotNone(timer_spent)
+        self.assertEqual(timer_spent.duration, 3600)
 
     def test_get_month_table(self):
         self.create_time_spents()

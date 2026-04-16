@@ -1385,6 +1385,7 @@ def create_or_update_time_spent(task_id, person_id, date, duration, add=False):
             task_id=task_id,
             person_id=person_id,
             date=func.cast(date, TimeSpent.date.type),
+            timer_id=None,
         )
     except DataError:
         raise WrongDateFormatException
@@ -1432,6 +1433,7 @@ def delete_time_spent(task_id, person_id, date):
             task_id=task_id,
             person_id=person_id,
             date=func.cast(date, TimeSpent.date.type),
+            timer_id=None,
         )
     except DataError:
         raise WrongDateFormatException
