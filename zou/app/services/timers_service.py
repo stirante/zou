@@ -396,6 +396,7 @@ def _sync_timer_time_spents(timer, project_id):
         for time_spent in TimeSpent.get_all_by(task_id=timer.task_id)
     )
     task.save()
+    tasks_service.clear_task_cache(str(task.id))
     events.emit(
         "task:update", {"task_id": str(task.id)}, project_id=project_id
     )
