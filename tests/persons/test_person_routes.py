@@ -1,6 +1,7 @@
 from tests.base import ApiDBTestCase
 
 from zou.app.models.day_off import DayOff
+from zou.app.models.person import Person
 
 
 class PersonRoutesTestCase(ApiDBTestCase):
@@ -173,6 +174,24 @@ class PersonRoutesTestCase(ApiDBTestCase):
             200,
         )
         self.assertTrue(result.get("success"))
+
+    def test_update_person_keeps_non_deliverable_unchanged_email(self):
+        # A person whose stored email is not deliverable (e.g. the default
+        # admin@example.com account) must still be able to update other
+        # fields. The email is only re-validated when it actually changes.
+        person = Person.get(self.user["id"])
+        person.update({"email": "admin@example.com"})
+
+        result = self.put(
+            f"/data/persons/{self.user['id']}",
+            {
+                "email": "admin@example.com",
+                "timezone": "Australia/Sydney",
+            },
+            200,
+        )
+        self.assertEqual(result["timezone"], "Australia/Sydney")
+        self.assertEqual(result["email"], "admin@example.com")
 
     def test_clear_avatar(self):
         self.delete(

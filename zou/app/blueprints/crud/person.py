@@ -575,10 +575,18 @@ class PersonResource(BaseModelResource, ArgsMixin):
                 raise WrongParameterException("Expiration date is not valid.")
 
         if "email" in data and data["email"] not in [None, ""]:
-            try:
-                data["email"] = auth.validate_email(data["email"])
-            except auth.EmailNotValidException as e:
-                raise WrongParameterException(str(e))
+            current_email = self.instance.email if self.instance else None
+            if data["email"] == current_email:
+                # Email unchanged: don't re-run validation. Deliverability
+                # checks rely on live DNS and would otherwise reject saving
+                # other fields whenever the stored address is non-deliverable
+                # (e.g. the default admin@example.com account).
+                del data["email"]
+            else:
+                try:
+                    data["email"] = auth.validate_email(data["email"])
+                except auth.EmailNotValidException as e:
+                    raise WrongParameterException(str(e))
         elif "email" in data:
             data["email"] = None
 
