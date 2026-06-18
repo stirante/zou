@@ -31,7 +31,7 @@ class PreviewFile(db.Model, BaseMixin, SerializerMixin):
     original_name = db.Column(db.String(250))
     revision = db.Column(db.Integer(), default=1)
     position = db.Column(db.Integer(), default=1)
-    extension = db.Column(db.String(6))
+    extension = db.Column(db.String(10))
     description = db.Column(db.Text())
     path = db.Column(db.String(400))
     source = db.Column(db.String(40))
